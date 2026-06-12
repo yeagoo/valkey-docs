@@ -1,0 +1,128 @@
+---
+title: AWS：ElastiCache 与 MemoryDB for Valkey
+description: AWS 上的两款托管 Valkey 服务、计费、Serverless 与节点型对比及迁移路径。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Zap, Database, Server } from 'lucide-react';
+
+AWS 是 Valkey 的主要发起方之一，也是托管支持最完整的云。它提供两款产品：**ElastiCache for Valkey**（缓存）和 **MemoryDB for Valkey**（持久化内存主库）。两者都在 2024 年 10 月随 Valkey 7.2 上线。
+
+## ElastiCache for Valkey
+
+ElastiCache for Valkey 于 2024 年 10 月 8 日发布（首发 Valkey 7.2）。版本随后持续演进：7.2 → 8.0 → 8.1（2025 年 7 月）→ 9.0（2026 年 5 月宣布）。9.0 覆盖所有商业区域、GovCloud 和 AWS 中国区，且**不额外收费**。
+
+它有两种部署形态：
+
+<Cards>
+  <Card icon={<Zap />} title="Serverless（无服务器）">
+    无需选规格，一分钟内完成预配，自动按量伸缩。适合波动负载和不想做容量规划的团队。
+  </Card>
+  <Card icon={<Server />} title="Node-based（节点型）">
+    自选实例规格，主力是 cache.r7g（内存优化）和 cache.m7g（通用）系列。负载稳定时成本更可控。
+  </Card>
+</Cards>
+
+### 价格亮点
+
+以下为截至 2026 年中的官方营销口径，请以 AWS 官网为准：
+
+| 维度 | 说法（约） |
+| --- | --- |
+| Serverless vs ElastiCache Serverless for Redis OSS | 低约 33% |
+| 节点型 vs ElastiCache for Redis OSS | 低约 20% |
+| Serverless 最低月费 | 低至约 $6/月（含 100MB 最小存储） |
+| Serverless 最低存储 vs Redis OSS Serverless | 低约 90% |
+
+<Callout type="info">
+Serverless 月费能压到约 $6，是因为最小存储仅 100MB，对小型/低流量场景非常友好；Redis OSS Serverless 的最低门槛要高出约一个量级。
+</Callout>
+
+## MemoryDB for Valkey
+
+MemoryDB 不是缓存，而是一款**持久化的多可用区内存数据库**，可以作为系统的记录源（system of record）。它通过一条分布式多可用区事务日志保证持久性，提供 **99.99% 可用性**。当你需要内存级速度，但又不能丢数据时，用它。
+
+### 数据写入计费
+
+MemoryDB for Valkey 的数据写入：**每月 10TB 以内免费，超出部分 $0.04/GB**——比 MemoryDB for Redis OSS 的 $0.20/GB **低约 80%**。
+
+节点本身另行计费。以 db.r6g.xlarge 为例：
+
+```text
+单节点 ≈ $0.432/小时 ≈ $315/月
+典型 2 节点集群 ≈ $630/月（含主+副本）
+```
+
+<Callout type="warn">
+上述为 2026 年中的参考数字，实际取决于区域、节点规格、副本数和数据写入量，请以官网计算器为准。
+</Callout>
+
+## 该用哪一个
+
+<Tabs items={['纯缓存', '持久主库', '波动负载']}>
+  <Tab value="纯缓存">
+    会话缓存、查询结果缓存、限流计数器——数据丢了可重建。用 **ElastiCache for Valkey**，成本最低。
+  </Tab>
+  <Tab value="持久主库">
+    把 Valkey 当主数据库，要求多可用区持久和 99.99% 可用性。用 **MemoryDB for Valkey**。
+  </Tab>
+  <Tab value="波动负载">
+    流量难以预测、不想做容量规划。用 **ElastiCache Serverless**，一分钟就绪，自动伸缩。
+  </Tab>
+</Tabs>
+
+## 节点家族怎么选
+
+ElastiCache for Valkey 节点型主要用两个 Graviton 系列：
+
+| 系列 | 定位 | 典型场景 |
+| --- | --- | --- |
+| cache.r7g | 内存优化 | 大缓存集、热点数据多、内存吃紧 |
+| cache.m7g | 通用均衡 | 内存与算力需求相对均衡的常规缓存 |
+
+经验法则：缓存的瓶颈通常是内存而非 CPU，所以多数场景从 **r7g** 起步更划算；只有当连接数/命令吞吐特别高、CPU 成为瓶颈时，才考虑往 m7g 或更大规格调整。
+
+<Callout type="info">
+不确定要不要做容量规划时，先用 **Serverless** 跑一段时间观察真实峰谷，再决定是否切到节点型锁定成本。这是把"成本可预测"和"省心"结合的稳妥做法。
+</Callout>
+
+## 从 ElastiCache for Redis OSS 迁移
+
+因为 Valkey 7.2 在**协议和数据格式上与 Redis 7.2 兼容**，从 ElastiCache for Redis OSS 迁移非常顺滑，支持：
+
+- **原地（in-place）升级**：直接把现有 Redis OSS 集群切换到 Valkey 引擎。
+- **蓝绿（blue-green）迁移**：并行起一套 Valkey，验证后切流，回滚成本低。
+
+```bash
+# 示意：以蓝绿方式从快照创建 Valkey 集群后切换流量
+aws elasticache create-replication-group \
+  --replication-group-id my-valkey \
+  --engine valkey \
+  --engine-version 9.0 \
+  --snapshot-name from-redis-oss-snapshot
+```
+
+### Snap 的迁移案例
+
+据公开报道，Snap 将约 70% 的集群迁移到 ElastiCache for Valkey 后，缓存支出下降约 60%——从约 **$2.1M/年降至约 $840K/年**。这是规模化缓存场景下 Valkey 成本优势的典型例证。
+
+### 迁移前的检查清单
+
+- 确认客户端 SDK 与 Valkey 7.2+ 兼容（绝大多数 Redis 客户端无需改动）。
+- 评估自定义 Lua 脚本与 Redis 模块依赖，确保在 Valkey 上有对应能力。
+- 先在蓝绿环境用影子流量验证，再切正式流量，保留快速回滚路径。
+- 迁移后对比 P99 延迟与内存占用，多数情况下 Valkey 会更优。
+
+<Callout type="warn">
+若你重度依赖 Redis 专有模块（如某些 Redis Enterprise 能力），迁移前务必确认 Valkey 侧的替代方案，详见 [选型与成本](/docs/cloud/selection) 中对 Redis Cloud 的说明。
+</Callout>
+
+## 小结
+
+- 纯缓存、最低成本：ElastiCache for Valkey（节点型或 Serverless）。
+- 持久、多可用区主库：MemoryDB for Valkey。
+- 已在用 ElastiCache for Redis OSS：原地或蓝绿迁移到 Valkey，几乎无痛且更省钱。
+
+继续阅读 [选型与成本](/docs/cloud/selection) 做跨厂商对比，或回到 [云上 Valkey 概览](/docs/on-cloud)。

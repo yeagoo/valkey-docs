@@ -1,0 +1,141 @@
+---
+title: 安全加固：ACL、TLS 与 LDAP
+description: 用 ACL 做细粒度授权、TLS/mTLS 加密传输，以及 valkey-ldap 对接企业目录认证。
+---
+
+默认配置下的 Valkey 远不够安全。本文从三层加固：用 **ACL** 控制谁能做什么、用 **TLS** 加密链路、用 **valkey-ldap** 对接企业目录。基础运维见 [运维总览](/docs/operations)。
+
+## ACL：细粒度访问控制
+
+Valkey 内置基于规则的访问控制列表。创建一个只能 `GET` 且只能访问 `cached:*` 键的用户：
+
+```bash
+valkey-cli ACL SETUSER alice on >s3cret ~cached:* +get
+```
+
+常用管理命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `ACL LIST` | 列出所有用户及其规则 |
+| `ACL GETUSER <user>` | 查看某用户的详细权限 |
+| `ACL WHOAMI` | 当前连接的用户 |
+| `ACL CAT` | 列出所有命令分类 |
+| `ACL DELUSER <user>` | 删除用户 |
+| `ACL GENPASS` | 生成强随机密码 |
+| `ACL SAVE` / `ACL LOAD` | 在外置 aclfile 与运行时之间存取 |
+
+### 规则语法
+
+| 类别 | 语法 | 示例 |
+| --- | --- | --- |
+| 命令 | `+cmd` / `-cmd` / `+@category` / `allcommands` | `+get -flushall +@read` |
+| 键 | `~glob`，`%R~` 只读，`%W~` 只写 | `~cached:*`，`%R~stats:*` |
+| 频道 | `&pattern` | `&news.*` |
+| 状态/密码 | `on`/`off`/`nopass`/`>pass`/`#hash`/`reset` | `on >pw`，`reset` |
+
+`reset` 会清空该用户全部权限，回到「无权限」起点，便于重新精确授权。
+
+### selectors（选择器）
+
+selector 允许给同一用户附加 **额外的、独立的权限组**：满足其中任一组即可执行。适合「主权限受限，但对某些键额外放开」的场景：
+
+```bash
+valkey-cli ACL SETUSER bob on >pw ~app:* +@read \
+  '(+set ~app:cache:*)'
+```
+
+上例 bob 默认对 `app:*` 只读，但选择器额外允许对 `app:cache:*` 执行 `SET`。
+
+### 锁定默认用户
+
+`requirepass` 本质只是给默认用户设密码的快捷方式。默认用户的初始规则是全开的：
+
+```text
+user default on nopass ~* &* +@all
+```
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+<Callout type="warn">
+`nopass ~* &* +@all` 意味着任何人无需密码即可执行任何命令、访问任何键和频道。生产环境必须立即锁定：要么设强密码并收紧规则，要么禁用默认用户、改用具名 ACL 用户。
+</Callout>
+
+```bash
+# 锁定默认用户
+valkey-cli ACL SETUSER default on '>strong-default-pw' ~* &* +@all
+# 或更彻底：禁用它
+valkey-cli ACL SETUSER default off
+```
+
+### 数据库级编号 ACL（Valkey 9.1）
+
+Valkey 9.1 新增 **数据库级的编号 ACL**，可以把用户权限限定到特定的逻辑数据库编号，为多租户隔离提供了更强的边界。
+
+## TLS：加密传输
+
+Valkey 的 TLS 支持需要在编译时开启：
+
+```bash
+make BUILD_TLS=yes
+```
+
+服务端配置：
+
+```ini
+tls-port 6379
+port 0                              # 关闭明文端口，仅走 TLS
+tls-cert-file /etc/valkey/tls/valkey.crt
+tls-key-file  /etc/valkey/tls/valkey.key
+tls-ca-cert-file /etc/valkey/tls/ca.crt
+tls-auth-clients yes                # 要求客户端证书（双向 TLS / mTLS）
+tls-replication yes                 # 复制链路也走 TLS
+tls-cluster yes                     # 集群总线也走 TLS
+```
+
+客户端连接：
+
+```bash
+valkey-cli --tls \
+  --cert /etc/valkey/tls/client.crt \
+  --key  /etc/valkey/tls/client.key \
+  --cacert /etc/valkey/tls/ca.crt \
+  -h valkey.example.com -p 6379
+```
+
+<Callout type="info">
+Valkey 9.1 增强了 TLS 运维：支持 **后台自动重载证书**（轮换证书无需重启），并在 `INFO` 中暴露证书 **过期时间**，便于提前告警。
+</Callout>
+
+务必保持 `protected-mode yes`（默认）。它在未设密码且监听非回环地址时拒绝外部连接，是防止误暴露的最后一道防线。
+
+## valkey-ldap：对接企业目录
+
+`valkey-ldap` 是用 Rust 编写的模块，已 GA，捆绑在 `valkey-bundle` 发行包中。它拦截 `AUTH` 命令，把认证请求转发给 LDAP / Active Directory。
+
+工作模式：
+
+- **bind 模式**：直接用「用户名 + 密码」向 LDAP 做 bind 验证。
+- **search + bind 模式**：先用服务账号搜索到用户 DN，再用该 DN + 密码做 bind，适合用户名与 DN 不一致的目录结构。
+
+关键点在于职责分离：
+
+<Callout type="info">
+LDAP 只负责 **认证（authn）**，本地 ACL 仍负责 **授权（authz）**。因此用户必须 **预先存在于 Valkey 的 ACL 中且不设本地密码**（如 `ACL SETUSER alice on nopass ~app:* +@read`），由 LDAP 校验其口令，由本地 ACL 决定其能做什么。
+</Callout>
+
+## 加固清单
+
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+<Steps>
+<Step>锁定或禁用默认用户，按最小权限创建具名 ACL 用户。</Step>
+<Step>开启 TLS，生产用 mTLS（`tls-auth-clients yes`），复制与集群总线一并加密。</Step>
+<Step>保持 `protected-mode yes`，`bind` 仅绑内网地址。</Step>
+<Step>需要企业统一认证时接入 valkey-ldap，并牢记 authn 与 authz 分离。</Step>
+<Step>9.1 起利用证书自动重载与过期监控，建立轮换流程。</Step>
+</Steps>
+
+## 下一步
+
+- [运维总览](/docs/operations)：安装、配置与持久化。

@@ -1,0 +1,134 @@
+---
+title: 脚本与函数：Lua、EVAL 与 FUNCTION
+description: 5 分钟掌握 EVAL/EVALSHA 与 Valkey Functions，用 Lua 写原子操作、限流器与安全释放锁。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Bot, Wrench } from 'lucide-react';
+
+Valkey 让你把多条命令打包成 Lua 脚本一起跑，**整段脚本串行执行**，等价于一次原子事务。
+脚本是构建「检查再写」「滑动窗口限流」「安全释放锁」的最佳工具。
+
+## EVAL：临时脚本
+
+```text
+127.0.0.1:6379> EVAL "return redis.call('SET', KEYS[1], ARGV[1])" 1 foo bar
+OK
+127.0.0.1:6379> GET foo
+"bar"
+```
+
+- `1` 是 KEYS 的个数，后面 `foo` 是 `KEYS[1]`，`bar` 是 `ARGV[1]`。
+- **永远把 Key 放进 KEYS**，不要拼到 ARGV，否则 Cluster 模式会路由错节点。
+
+<Callout type="info">
+Valkey 的 Lua 沙箱里，`redis.*` 与 `server.*` 是同一套 API 的别名。新代码推荐用 `server.call(...)`，
+读老仓库时看到 `redis.call(...)` 也等价。
+</Callout>
+
+## EVALSHA：缓存脚本省带宽
+
+`SCRIPT LOAD` 把脚本存入 Server 端，返回 SHA1；之后用 `EVALSHA <sha> ...` 直接调用，避免每次重传脚本体。
+
+```text
+127.0.0.1:6379> SCRIPT LOAD "return server.call('GET', KEYS[1])"
+"e0e1f9fabfc9d4800c877a703b823ac0578ff831"
+127.0.0.1:6379> SET k hello
+OK
+127.0.0.1:6379> EVALSHA e0e1f9fabfc9d4800c877a703b823ac0578ff831 1 k
+"hello"
+```
+
+客户端通常封装为：先 `EVALSHA`；若返回 `NOSCRIPT` 错误，再 `SCRIPT LOAD + EVALSHA` 重试。
+
+## 例 1：安全释放分布式锁
+
+经典「先验证 owner 再删除」原子操作，避免误删别人的锁：
+
+```text
+127.0.0.1:6379> SET lock:order:42 owner-uuid-abc NX EX 30
+OK
+127.0.0.1:6379> EVAL "if server.call('GET', KEYS[1]) == ARGV[1] then return server.call('DEL', KEYS[1]) else return 0 end" 1 lock:order:42 owner-uuid-abc
+(integer) 1
+```
+
+返回 `1` 表示锁是自己的并已释放；返回 `0` 表示锁已被别人持有，没动它。
+
+## 例 2：原子检查再写
+
+「库存大于 0 才扣减」一条 Lua 搞定：
+
+```text
+127.0.0.1:6379> SET stock:1 5
+OK
+127.0.0.1:6379> EVAL "local n = tonumber(server.call('GET', KEYS[1])) or 0; if n > 0 then server.call('DECR', KEYS[1]); return 1 else return 0 end" 1 stock:1
+(integer) 1
+```
+
+## 例 3：滑动窗口限流器
+
+`ZSET` + Lua，原子完成「清窗口 + 计数 + 判定 + 写入」：
+
+```text
+127.0.0.1:6379> EVAL "local now = tonumber(ARGV[1]); local win = tonumber(ARGV[2]); local lim = tonumber(ARGV[3]); server.call('ZREMRANGEBYSCORE', KEYS[1], 0, now - win); local c = server.call('ZCARD', KEYS[1]); if c < lim then server.call('ZADD', KEYS[1], now, now); server.call('EXPIRE', KEYS[1], math.ceil(win/1000)); return 1 else return 0 end" 1 rl:u1 1718260123000 60000 100
+(integer) 1
+```
+
+参数：当前毫秒、窗口毫秒、阈值。返回 `1` 放行，`0` 拒绝。
+
+## Valkey Functions：脚本的进化版
+
+Functions 是 Valkey 的「持久化脚本库」：用 `FUNCTION LOAD` 注册一组命名函数，之后用 `FCALL` 调用，
+**会随 RDB/AOF 持久化、随复制传给从库、跨重启依然存在**——比每次 `EVAL` 优雅得多。
+
+| 命令 | 说明 |
+| --- | --- |
+| `FUNCTION LOAD [REPLACE] "<source>"` | 加载/替换一个库 |
+| `FCALL fname numkeys k... a...` | 调用函数（读写） |
+| `FCALL_RO fname numkeys k... a...` | 只读调用，可走从库 |
+| `FUNCTION LIST` | 列出已加载的库与函数 |
+| `FUNCTION DELETE libname` | 删除整个库 |
+| `FUNCTION DUMP / RESTORE` | 序列化迁移 |
+
+最小例子（一个把 KEYS[1] 设成 ARGV[1] 的函数 `myset`）：
+
+```text
+127.0.0.1:6379> FUNCTION LOAD "#!lua name=mylib\nserver.register_function('myset', function(keys, args) return server.call('SET', keys[1], args[1]) end)"
+"mylib"
+127.0.0.1:6379> FCALL myset 1 hello world
+OK
+127.0.0.1:6379> GET hello
+"world"
+```
+
+注意首行 `#!lua name=mylib` 是必需的「引擎 + 库名」声明。
+
+## 写脚本与函数的注意事项
+
+- **越短越好**。整个脚本期间所有其它命令都得等，长脚本 = 全局卡顿。
+- **只通过 KEYS 引用 Key**，便于 Cluster 校验、便于看依赖。
+- **避免不确定性**：尽量不要在脚本里依赖外部随机或时间，把这些放进 ARGV 由客户端传入。
+- **错误处理**：用 `pcall` 包住可能失败的 `server.call`，自定义错误返回结构。
+- `FCALL_RO` / `EVAL_RO` 标记只读，可在副本上执行，扩展读吞吐。
+
+<Callout type="info">
+Valkey 9.1 把 Lua 引擎做成了可禁用模块（默认仍启用）。如果你的部署完全不用脚本，可以禁用以减少攻击面与内存。
+</Callout>
+
+## 继续阅读
+
+<Cards>
+  <Card
+    icon={<Bot />}
+    href="/docs/zh/for-ai-devs"
+    title="给 AI 开发者"
+    description="把 Valkey 当向量库、消息总线、Agent 状态存储。"
+  />
+  <Card
+    icon={<Wrench />}
+    href="/docs/zh/operations"
+    title="运维总览"
+    description="部署、监控、持久化、复制、Cluster 与升级。"
+  />
+</Cards>

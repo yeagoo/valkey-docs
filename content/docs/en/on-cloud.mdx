@@ -1,0 +1,82 @@
+---
+title: Valkey on the cloud
+description: Provider-by-provider matrix of managed Valkey offerings as of mid-2026.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+<Callout type="info">
+Pricing changes constantly and varies by region. Numbers in this page are directional only — always check the provider's pricing page for your region before committing.
+</Callout>
+
+## Provider matrix
+
+| Provider | Service | Engine choice | Free tier | TLS | Multi-AZ HA | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| AWS | ElastiCache for Valkey | Valkey 7.2 / 8.x / 9.x | no | yes | yes | About 33% cheaper than equivalent Redis OSS option; default for new ElastiCache clusters |
+| AWS | MemoryDB for Valkey | Valkey 7.2+ | no | yes | yes | Multi-AZ durable, Valkey-compatible |
+| GCP | Memorystore for Valkey | Valkey 7.2 / 8.x | no | yes | yes | Memorystore for Redis frozen at 7.2; new versions go to the Valkey product |
+| Aiven | Valkey | 7.2 / 8.1 / 9.1 | yes (1 GB shared) | yes | yes | First major DBaaS to migrate; multi-cloud |
+| Oracle | OCI Cache with Valkey | 7.2 / 8.x | trial credits | yes | yes | OCI-native, integrated with OCI IAM |
+| DigitalOcean | Managed Valkey | 8.x / 9.x | no | yes | yes (HA tier) | Simple pricing, droplet-style |
+| Linode (Akamai) | Managed Valkey | 7.2 / 8.x | no | yes | optional | Lower-cost option |
+| Azure | Cache for Redis | Redis only | no | yes | yes | No native Valkey offering as of mid-2026 — self-host or use Aiven on Azure |
+| 阿里云 Alibaba | Tair (Valkey-compatible) | Tair edition | no | yes | yes | Tair is Alibaba's enhanced fork; Valkey-compatible mode available |
+| 腾讯云 Tencent | TencentDB for Redis | mixed | no | yes | yes | Migrating engines toward Valkey, check region |
+| 华为云 Huawei | DCS | Redis / Valkey | no | yes | yes | Valkey support added 2025 |
+
+## Notes by provider
+
+### AWS
+
+AWS was a founding sponsor of Valkey and pushed hardest on the migration story. ElastiCache for Valkey is positioned as the default engine for new caches; existing Redis OSS clusters can be migrated in-place via the AWS console. Pricing tends to land roughly 30 percent below the equivalent Redis OSS configuration of the same node type.
+
+MemoryDB is the durable variant — multi-AZ replicated transaction log, intended as a primary database, not just a cache. Valkey support arrived in 2024.
+
+### Google Cloud
+
+The original "Memorystore for Redis" product is frozen at 7.2 (the last BSD Redis). New Valkey versions ship through "Memorystore for Valkey," which Google promotes as the forward-looking option.
+
+### Aiven
+
+Aiven was the first major DBaaS to migrate, completing a roughly 15,000-server move from Redis to Valkey through 2024. The free tier is meaningful (1 GB shared) and good for prototyping. Aiven runs on AWS / GCP / Azure / DigitalOcean / UpCloud, so you can use it as a portable Valkey layer regardless of underlying cloud.
+
+### Oracle
+
+OCI Cache offers Valkey alongside Redis. Tight integration with OCI Identity is the differentiator if you are already in OCI.
+
+### DigitalOcean / Linode
+
+Simpler pricing for indie / SMB. DigitalOcean's HA tier is straightforward — single click adds a standby replica. Good for side projects and early-stage startups.
+
+### Azure
+
+Azure has not shipped a native Valkey product as of June 2026. If you are on Azure and want Valkey, options are: (a) self-host on Azure VMs, (b) Aiven for Valkey running on Azure region, (c) wait — Azure's roadmap mentions Valkey support.
+
+### China clouds
+
+Alibaba's Tair is a Valkey-compatible store with extensions (TairString, TairHash with field TTL, persistent memory tier, etc.). Many features that ended up in upstream Valkey were prototyped in Tair. Tencent Cloud and Huawei Cloud both support Valkey, with the specific availability varying by region.
+
+## Self-host vs managed: rough decision rule
+
+| Situation | Recommendation |
+| --- | --- |
+| Single team, < 10 GB, no SLA | self-host on a VM is fine |
+| Multi-tenant, multi-AZ, on-call rotation | managed |
+| Strict data residency or compliance | self-host or sovereign-cloud provider |
+| Latency-sensitive (sub-millisecond) | self-host close to app, or AWS MemoryDB with same-AZ pinning |
+| Want vector + cache + memory unified | any managed Valkey with modules enabled |
+
+## Cost ballpark
+
+For a single ~ 8 GB Valkey node with HA, expect roughly:
+
+| Provider | Monthly USD (rough, on-demand) |
+| --- | --- |
+| AWS ElastiCache (cache.m7g.large, multi-AZ) | $200-250 |
+| GCP Memorystore (Standard 8 GB) | $180-230 |
+| Aiven (Business-4, 1 vCPU 4 GB) | $130-180 |
+| DigitalOcean (Managed Valkey HA 8 GB) | $130-170 |
+| Self-hosted on a $80/mo VM with manual HA | $80-100 + your time |
+
+Multi-region replication, backups, and egress are usually billed extra. For low-latency apps, the cost of cross-AZ traffic between app and cache often dwarfs the cache itself — co-locate.

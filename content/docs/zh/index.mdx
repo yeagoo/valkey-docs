@@ -1,0 +1,91 @@
+---
+title: 欢迎来到 Valkey 中文社区文档
+description: 一个面向新手、AI 开发者与云上用户的现代 Valkey 知识库
+---
+
+## 这是什么？
+
+这是一份**中文优先、多语种**的 Valkey 文档与学习资料。Valkey 是 [Redis](https://redis.io) 在 2024 年改用源可见许可证（SSPL/RSAL）后，由社区从最后一个 BSD 开源版本 **Redis 7.2.4** 分叉出来的高性能键值存储，现由 **Linux 基金会**托管，背后站着 AWS、Google Cloud、Oracle、Ericsson、Snap 等公司。
+
+我们不打算复制官方 [valkey.io/topics](https://valkey.io/topics/) 那本逐命令的参考手册，而是用**任务驱动**和**场景化**的方式重新组织 Valkey 的知识，目标读者是：
+
+- **新人 / 从 Redis 来的人**：想知道 Valkey 到底是不是"换个名字的 Redis"，该不该迁、怎么迁；
+- **AI 开发者 / Vibe Coder**：用 Cursor、Claude Code、Windsurf 写代码，需要向量检索、语义缓存、Agent 记忆、MCP 接入；
+- **云上用户**：选 AWS ElastiCache、MemoryDB、GCP Memorystore、Aiven 还是自建？Valkey 比托管 Redis 便宜在哪？
+
+## 一句话讲清 Valkey 和 Redis
+
+> **Valkey ≈ 当年那个 BSD 协议的 Redis，继续往前走。**
+
+- **协议、命令、客户端完全兼容**：RESP2/RESP3 一字不差，`redis-py`、`Jedis`、`go-redis`、`ioredis` 不改一行代码就能连。
+- **数据文件兼容（有边界）**：Redis ≤ 7.2 的 `dump.rdb` / AOF 可直接被 Valkey 加载；但 **Redis 7.4+ 之后两边的 RDB 格式各自演化，不再互通**。
+- **许可证不同**：Valkey 是宽松的 **BSD-3**；Redis 8 现在是 **AGPLv3 / RSALv2 / SSPLv1** 三选一。
+- **性能各自迭代**：Valkey 8.0 引入异步多线程 I/O，单机冲到约 120 万 QPS；9.x 继续优化内存与吞吐。
+
+详细对照见 [Redis 还是 Valkey？](/docs/migration/redis-vs-valkey)。
+
+## 从哪里开始？
+
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Sparkles, Bot, Cloud, GitBranch, BookOpen, Wrench, Layers, Server, Search, GitMerge, Database, Compass } from 'lucide-react';
+
+### 第一次来？
+
+<Cards>
+  <Card icon={<Sparkles />} title="5 分钟快速开始" href="/docs/quickstart" description="Docker / 包管理器 / 一键云实例，三条最短路径。" />
+  <Card icon={<BookOpen />} title="新手入门" href="/docs/for-beginners" description="键值存储、内存数据库、Valkey 是什么的人话版。" />
+  <Card icon={<Compass />} title="数据结构 5 分钟系列" href="/docs/newbie/strings" description="String、Hash、List、Set、ZSet、Stream、过期、脚本。" />
+</Cards>
+
+### 从 Redis 来？
+
+<Cards>
+  <Card icon={<GitBranch />} title="Redis 还是 Valkey" href="/docs/migration/redis-vs-valkey" description="许可证、线程模型、Redis 8 反扑，一文看懂。" />
+  <Card icon={<GitMerge />} title="从 Redis 迁移" href="/docs/migration/from-redis" description="文件直换 / 复制级在线迁移 / 客户端零改动。" />
+  <Card icon={<Layers />} title="Redis Stack 怎么办" href="/docs/migration/from-redis-stack" description="RediSearch / JSON / Bloom 在 Valkey 的对应模块。" />
+</Cards>
+
+### 想做 AI 应用？
+
+<Cards>
+  <Card icon={<Search />} title="向量检索 valkey-search" href="/docs/ai/vector-search" description="HNSW + FT.* 命令，替代 RediSearch 做 RAG。" />
+  <Card icon={<Bot />} title="LLM 语义缓存" href="/docs/ai/semantic-cache" description="按语义命中，省下高达 86% 的推理成本。" />
+  <Card icon={<Database />} title="Agent 记忆与会话" href="/docs/ai/agent-memory" description="Mem0 / LangGraph 原生 Valkey 后端实战。" />
+</Cards>
+
+### 部署到云？
+
+<Cards>
+  <Card icon={<Cloud />} title="AWS ElastiCache / MemoryDB" href="/docs/cloud/aws" description="比 Redis OSS 便宜 20–33%，serverless 起步 ~$6/月。" />
+  <Card icon={<Cloud />} title="GCP Memorystore" href="/docs/cloud/gcp-memorystore" description="1–250 节点、多 VPC、内置向量检索。" />
+  <Card icon={<Cloud />} title="选型与成本" href="/docs/cloud/selection" description="托管 Valkey vs 托管 Redis，怎么选最省。" />
+</Cards>
+
+### 运维与原理
+
+<Cards>
+  <Card icon={<Server />} title="运维总览" href="/docs/operations" description="安装、配置、持久化、备份的全套实操。" />
+  <Card icon={<Wrench />} title="复制与高可用" href="/docs/replication-ha" description="主从、Sentinel、8.0 双通道复制、故障转移。" />
+  <Card icon={<Layers />} title="多线程原理" href="/docs/internals/threading" description="8.0 异步 I/O、per-slot 字典、内存优化。" />
+</Cards>
+
+## 当前版本快照
+
+> 本节会随 Valkey 官方发布节奏更新。
+
+- **最新稳定版**：Valkey **9.1**（2026-05 GA）—— 数据库级 ACL、新 I/O 线程模型（单机 ~210 万 RPS）、`HGETDEL` / `MSETEX` / `CLUSTERSCAN`、JSON 日志。
+- **上一代**：**9.0**（2025-10，原子槽迁移、集群多库、Hash 字段 TTL）、**8.1**（内存优化 ~20%，LTS）。
+- **分叉基线**：**7.2**（drop-in 兼容 Redis 7.2.4，LTS）。
+- **支持策略**：每个次版本提供 3 年维护，最新次版本提供 5 年安全支持；`x.1` 版本（7.2 / 8.1 / 9.1）安全窗口更长。
+
+详见 [版本与路线图](/docs/versions)。
+
+## 参与贡献
+
+这个站点本身开源，欢迎在 GitHub 上：
+
+- 提 issue 报告错误或建议主题；
+- 提 PR 翻译韩语 / 西语 / 葡语；
+- 把你踩过的 Valkey / Redis 迁移坑写成文章贡献进来。
+
+> 💡 **AI 友好提示**：Valkey 本身就是宽松 BSD 协议——把它嵌进你的 AI 产品、当 Agent 的记忆层，都没有 SSPL/AGPL 的合规顾虑。这也是越来越多 AI 创业公司选它的原因之一。

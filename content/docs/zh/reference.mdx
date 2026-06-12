@@ -1,0 +1,197 @@
+---
+title: 速查参考
+description: Valkey 常用命令、配置、URI、端口、退出码一页带走。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## 常用命令分类
+
+### 字符串 (String / KV)
+
+| 命令 | 作用 |
+| --- | --- |
+| `SET key value [EX sec] [NX\|XX]` | 设置值，可附 TTL |
+| `GET key` | 读 |
+| `INCR / DECR key` | 自增 / 自减 |
+| `MSET k1 v1 k2 v2` | 批量设置 |
+| `GETEX key EX sec` | 读并设 TTL |
+| `STRLEN key` | 长度 |
+
+### 哈希 (Hash)
+
+| 命令 | 作用 |
+| --- | --- |
+| `HSET key f1 v1 f2 v2` | 设置字段 |
+| `HGET / HMGET / HGETALL` | 读字段 |
+| `HEXPIRE key sec FIELDS n f1 ...` | 字段级 TTL（8.0+） |
+| `HINCRBY key field n` | 字段自增 |
+
+### 列表 (List)
+
+| 命令 | 作用 |
+| --- | --- |
+| `LPUSH / RPUSH key v` | 左 / 右 push |
+| `LPOP / RPOP key [count]` | pop |
+| `BLPOP / BRPOP key timeout` | 阻塞 pop |
+| `LRANGE key start stop` | 范围取 |
+| `LMOVE src dst LEFT RIGHT` | 原子转移 |
+
+### 集合 (Set)
+
+| 命令 | 作用 |
+| --- | --- |
+| `SADD / SREM key m` | 增 / 删 |
+| `SMEMBERS key` | 全部 |
+| `SINTER / SUNION / SDIFF` | 集合运算 |
+| `SRANDMEMBER key [count]` | 随机取 |
+
+### 有序集合 (Sorted Set / ZSet)
+
+| 命令 | 作用 |
+| --- | --- |
+| `ZADD key score member` | 增 |
+| `ZRANGE key 0 -1 [WITHSCORES]` | 范围 |
+| `ZRANGEBYSCORE key min max` | 按分值 |
+| `ZINCRBY key n member` | 分值自增 |
+| `ZPOPMIN / ZPOPMAX key` | 弹出极值 |
+
+### 流 (Stream)
+
+| 命令 | 作用 |
+| --- | --- |
+| `XADD key * field value` | 追加 |
+| `XREAD COUNT n STREAMS key id` | 读 |
+| `XGROUP CREATE key grp $` | 消费组 |
+| `XREADGROUP GROUP grp consumer ...` | 组消费 |
+| `XACK key grp id` | 确认 |
+
+### 服务端
+
+| 命令 | 作用 |
+| --- | --- |
+| `PING` | 探活 |
+| `INFO [section]` | 运行时信息 |
+| `CONFIG GET / SET param` | 动态配置 |
+| `CLIENT LIST / KILL` | 连接管理 |
+| `DBSIZE` | 当前 DB key 数 |
+| `FLUSHDB / FLUSHALL` | 清库（生产慎用） |
+
+### 集群
+
+| 命令 | 作用 |
+| --- | --- |
+| `CLUSTER INFO` | 集群状态 |
+| `CLUSTER NODES` | 节点列表 |
+| `CLUSTER SLOTS / SHARDS` | 槽分布 |
+| `CLUSTER COUNTKEYSINSLOT slot` | 某槽 key 数 |
+| `CLUSTER FAILOVER` | 手动主从切换 |
+
+### ACL
+
+| 命令 | 作用 |
+| --- | --- |
+| `ACL LIST` | 所有用户 |
+| `ACL SETUSER name on >pwd ~prefix:* +@read` | 创建 / 改 |
+| `ACL WHOAMI` | 当前身份 |
+| `ACL CAT` | 命令类别 |
+
+## 连接 URI 格式
+
+| Scheme | 含义 |
+| --- | --- |
+| `redis://` | 明文 TCP（兼容历史客户端） |
+| `rediss://` | TLS TCP（兼容） |
+| `valkey://` | 明文 TCP（推荐新项目） |
+| `valkeys://` | TLS TCP（推荐新项目） |
+| `unix://` | Unix socket |
+
+完整示例：
+
+```
+valkeys://default:pass@node-1.example.com:6379/0?timeout=2s
+```
+
+大多数主流客户端（redis-py、ioredis、go-redis、jedis、lettuce）已经接受 `valkey://` scheme，老版本仍可用 `redis://` 连接 Valkey 服务端。
+
+## valkey.conf 常用配置
+
+| 配置项 | 说明 | 常用值 |
+| --- | --- | --- |
+| `port` | 监听端口 | 6379 |
+| `bind` | 绑定 IP | 127.0.0.1 / 0.0.0.0 |
+| `protected-mode` | 受保护模式 | yes |
+| `requirepass` | 老式密码（建议用 ACL 取代） | - |
+| `maxmemory` | 最大内存 | 4gb |
+| `maxmemory-policy` | 淘汰策略 | allkeys-lru |
+| `appendonly` | AOF 开关 | yes |
+| `appendfsync` | AOF 刷盘 | everysec |
+| `save` | RDB 触发条件 | `3600 1 300 100` |
+| `cluster-enabled` | 集群模式 | no |
+| `replica-read-only` | 从节点只读 | yes |
+| `io-threads` | IO 线程数 | 4 |
+| `tls-port` | TLS 端口 | 6379 |
+
+`maxmemory-policy` 可选：`noeviction` / `allkeys-lru` / `allkeys-lfu` / `volatile-lru` / `volatile-lfu` / `allkeys-random` / `volatile-random` / `volatile-ttl`。
+
+## valkey-cli 有用的 flag
+
+| Flag | 作用 |
+| --- | --- |
+| `-h host -p port` | 目标 |
+| `-a password` | 密码 |
+| `--user name` | ACL 用户 |
+| `-n db` | 选库 |
+| `-c` | 集群模式（自动跟 MOVED） |
+| `--tls` | 启用 TLS |
+| `--scan --pattern 'user:*'` | 扫 key（生产推荐用 SCAN 而非 KEYS） |
+| `--bigkeys` | 找大 key |
+| `--memkeys` | 按内存找 key |
+| `--latency` | 实时延迟 |
+| `--latency-history` | 周期延迟 |
+| `--stat` | 简短运行统计 |
+| `-x` | 从 stdin 读最后一个参数（管道场景） |
+| `--rdb dump.rdb` | 下载 RDB |
+
+## INFO 主要 section
+
+| Section | 内容 |
+| --- | --- |
+| `server` | 版本 / 启动时间 / OS |
+| `clients` | 连接数 / 阻塞数 |
+| `memory` | 内存使用 / 碎片率 |
+| `persistence` | RDB / AOF 状态 |
+| `stats` | 总命令数 / 命中率 |
+| `replication` | 主从角色 / 偏移量 |
+| `cpu` | CPU 占用 |
+| `commandstats` | 每命令调用计数 / 延迟 |
+| `cluster` | 集群启用与否 |
+| `keyspace` | 每 DB key 数 / TTL 数 |
+
+`INFO server` 既会显示 `redis_version`（保留兼容），也会显示 `valkey_version`——很多客户端通过前者识别为 Redis，这是有意为之。
+
+## 端口约定
+
+| 端口 | 用途 |
+| --- | --- |
+| 6379 | 客户端 |
+| 16379 | 集群 bus（= 客户端端口 + 10000） |
+| 26379 | Sentinel |
+| 7443 | TLS 客户端（Aiven 等托管商使用） |
+
+集群模式下两个端口必须都开放。
+
+## 退出码
+
+| 退出码 | 含义 |
+| --- | --- |
+| 0 | 正常退出（SHUTDOWN） |
+| 1 | 启动失败（配置错 / 端口占用 / 权限） |
+| 130 | 收到 SIGINT |
+| 143 | 收到 SIGTERM |
+
+valkey-cli 的退出码也遵循同样语义，方便脚本判断。
+
+<Callout type="info">
+更多命令文档：[valkey.io/commands](https://valkey.io/commands)。
+</Callout>

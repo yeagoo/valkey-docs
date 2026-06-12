@@ -1,0 +1,112 @@
+---
+title: Pub/Sub：实时广播与分片订阅
+description: 用发布订阅做实时消息广播、键空间通知，以及集群可扩展的分片订阅
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+> Pub/Sub（发布 / 订阅）是一种「即时广播」模型：发布者把消息扔进一个频道，所有正在订阅该频道的客户端立刻收到。它和数据结构无关，纯粹是消息通道——轻、快、但不持久。
+
+## 订阅与发布
+
+需要两个客户端。先在一个 `valkey-cli` 里订阅：
+
+```text
+127.0.0.1:6379> SUBSCRIBE news
+1) "subscribe"
+2) "news"
+3) (integer) 1
+（保持监听……）
+```
+
+再开另一个 `valkey-cli` 发布消息：
+
+```text
+127.0.0.1:6379> PUBLISH news "Valkey 9.1 发布了"
+(integer) 1
+```
+
+订阅端立刻收到：
+
+```text
+1) "message"
+2) "news"
+3) "Valkey 9.1 发布了"
+```
+
+`PUBLISH` 返回的 `1` 是「收到这条消息的订阅者数量」。如果发布时没人订阅，返回 `0`，消息直接丢弃。
+
+## 模式订阅
+
+`PSUBSCRIBE` 支持通配符，一次订阅一批频道：
+
+```text
+127.0.0.1:6379> PSUBSCRIBE news.*
+（会收到 news.tech、news.sport 等所有匹配频道）
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `SUBSCRIBE c...` | 订阅一个或多个频道 |
+| `PSUBSCRIBE pat...` | 按模式订阅（`*`、`?`、`[]`） |
+| `PUBLISH c msg` | 向频道发布消息 |
+| `PUBSUB CHANNELS` | 列出当前活跃频道 |
+| `PUBSUB NUMSUB c` | 查某频道的订阅者数量 |
+
+```text
+127.0.0.1:6379> PUBSUB CHANNELS
+1) "news"
+127.0.0.1:6379> PUBSUB NUMSUB news
+1) "news"
+2) (integer) 1
+```
+
+## 集群里的难题与分片订阅
+
+普通 Pub/Sub 在集群模式下，一条消息要广播到**所有**节点，频道多、节点多时会成为瓶颈。Valkey 提供「分片 Pub/Sub」：消息只在频道所属的那个分片内传播，从而横向扩展。
+
+```text
+# 订阅端
+127.0.0.1:6379> SSUBSCRIBE orders
+# 发布端
+127.0.0.1:6379> SPUBLISH orders "新订单 #42"
+(integer) 1
+```
+
+`SSUBSCRIBE` / `SPUBLISH` 与普通版用法一致，区别在于消息按 key 的哈希槽路由，集群规模越大优势越明显。
+
+## 键空间通知：监听数据变化
+
+Pub/Sub 还能用来「监听某个 key 的变化」。开启 `notify-keyspace-events` 后，每当 key 被修改、过期、删除，Valkey 会自动往特殊频道发通知。
+
+```text
+127.0.0.1:6379> CONFIG SET notify-keyspace-events KEA
+OK
+# 在另一个客户端订阅「过期事件」
+127.0.0.1:6379> PSUBSCRIBE __keyevent@0__:expired
+```
+
+之后任何 key 过期，订阅端都会收到该 key 名。这常用于实现「订单 15 分钟未支付自动取消」：给订单 key 设 TTL，监听其过期事件即可触发后续逻辑。
+
+<Callout type="warn">
+**Pub/Sub 是即发即弃的。** 它不持久化、不重试：订阅者掉线期间的消息会永久丢失；没有 ack、没有历史回放。它适合「实时但可容忍丢失」的场景（在线状态、实时弹幕、配置推送）。
+
+如果你需要消息**不丢**、能回溯、能多消费者确认，请改用 [Stream](/docs/zh/newbie/streams)。
+</Callout>
+
+## 该选哪个？
+
+| 需求 | 选择 |
+| --- | --- |
+| 实时广播，可容忍丢失 | Pub/Sub |
+| 集群下可扩展的广播 | 分片 Pub/Sub（`SPUBLISH`） |
+| 消息不能丢 + 历史回放 + 消费组 | Stream |
+| 简单任务队列 | List（`BRPOP` / `BLMOVE`） |
+
+---
+
+## 下一篇
+
+聊完了所有数据结构，接下来是两个贯穿全局的运维基础——过期与内存淘汰。
+
+继续阅读 → [过期与淘汰：TTL 与 maxmemory](/docs/zh/newbie/ttl-and-eviction)

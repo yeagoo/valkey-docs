@@ -1,0 +1,103 @@
+---
+title: Valkey for AI developers
+description: Vector search, semantic cache, and agent memory in one Valkey process — the unified AI data layer pitch.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Search, Brain, Database } from 'lucide-react';
+
+## The pitch in one sentence
+
+Modern AI applications need three data services that traditional stacks split across three systems: **vector search** (Pinecone / Weaviate / Qdrant), **semantic cache** (custom Redis + embedding model), and **agent memory** (Mem0 / LangGraph store). Valkey 9.x puts all three behind one connection, one ACL, one operations story.
+
+<Cards>
+  <Card icon={<Search />} title="Vector search">
+    HNSW indexes via valkey-search. Hybrid filter + similarity. Same connection as your cache.
+  </Card>
+  <Card icon={<Database />} title="Semantic cache">
+    Hash a prompt → embed → ANN lookup → return cached LLM response if cosine similarity > threshold.
+  </Card>
+  <Card icon={<Brain />} title="Agent memory">
+    Mem0 and LangGraph have native Valkey backends. Episodic and semantic memory in one store.
+  </Card>
+</Cards>
+
+## valkey-search basics
+
+`valkey-search` is the official vector + full-text module, GA since Valkey 9.0. Index creation:
+
+```bash
+valkey-cli FT.CREATE idx:docs ON HASH PREFIX 1 doc: \
+  SCHEMA \
+    title TEXT \
+    body TEXT \
+    embedding VECTOR HNSW 6 TYPE FLOAT32 DIM 1536 DISTANCE_METRIC COSINE
+```
+
+Index a document:
+
+```bash
+valkey-cli HSET doc:1 \
+  title "Valkey 9.1 release notes" \
+  body "..." \
+  embedding "$(python embed.py 'release notes')"
+```
+
+Hybrid query — top 5 most similar where body contains "RDMA":
+
+```
+FT.SEARCH idx:docs "@body:RDMA =>[KNN 5 @embedding $vec AS score]" \
+  PARAMS 2 vec "$BLOB" \
+  RETURN 2 title score \
+  DIALECT 2
+```
+
+The "hybrid" piece — combining BM25 filters with KNN — is the differentiator versus pure vector databases. You do not need to round-trip to a second system to filter by tenant id, language, or recency.
+
+## Semantic cache
+
+The pattern that AWS reported **~86 percent cost reduction** in internal customer support workloads:
+
+1. Embed the incoming prompt with a cheap embedding model (text-embedding-3-small or open-source).
+2. ANN search in `valkey-search` over historical (prompt, response) pairs.
+3. If best match has cosine similarity > 0.92 (tune per domain), return the cached response.
+4. Otherwise call the expensive LLM, then `HSET` the new pair with its embedding for future hits.
+
+A reference implementation in Python is ~80 lines. The cache hit rate is the whole story — high-similarity domains (customer support, FAQ, docs Q&A) hit 60-90%; creative or coding workloads hit < 20%.
+
+<Callout type="warn">
+Tune the threshold per use case. 0.92 is conservative for English text-embedding-3 vectors; lower thresholds save more cost but risk semantically-close-but-factually-different answers. Always log a `cache_hit` boolean and sample evals.
+</Callout>
+
+## Agent memory: Mem0 and LangGraph
+
+Both frameworks ship Valkey backends as a first-class option:
+
+- **Mem0** — `from mem0 import Memory; m = Memory.from_config({"vector_store": {"provider": "valkey", "config": {"url": "valkey://..."}}})`. Stores episodic memories (interactions) and semantic memories (facts) in Valkey hashes + a vector index.
+- **LangGraph** — the `langgraph-checkpoint-valkey` package replaces the default in-memory checkpointer with Valkey for durable graph state, enabling resume-after-restart for long-running agents.
+
+The shared advantage: your cache, your retrieval, your memory, and your rate-limit counters all live in one place. One Helm chart, one IAM role, one set of CloudWatch dashboards.
+
+## Native vector vs compatibility-layer table
+
+A common question is "can I just use valkey-search like Pinecone." Short answer: similar primitives, different operational shape.
+
+| Aspect | valkey-search (native) | Dedicated vector DB |
+| --- | --- | --- |
+| Latency to ANN | P99 < 5 ms in-region | 10-30 ms cross-service |
+| Throughput | 100k+ QPS / shard | varies, often lower per node |
+| Hybrid filter | first class | first class |
+| Connection model | same as cache | separate service |
+| Operational surface | one process | one more system |
+| Updates / TTL | every Valkey command available | varies |
+| Max vectors / node | ~100M depending on dim | varies |
+| ACL / multi-tenant | full Valkey ACL | varies |
+
+Valkey wins when you already have Valkey and your vector count fits one or a few shards. Dedicated vector DBs win at billion-vector scale with heavy analytical query patterns.
+
+## Read on
+
+- [valkey.io/topics/vector-search](https://valkey.io/topics/vector-search)
+- [Mem0 docs](https://docs.mem0.ai)
+- [LangGraph checkpointer reference](https://langchain-ai.github.io/langgraph/)

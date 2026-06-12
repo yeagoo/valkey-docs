@@ -1,0 +1,47 @@
+---
+title: Welcome to the Valkey Community Docs
+description: A practitioner-focused guide to Valkey, the BSD-licensed Redis 7.2.4 fork stewarded by the Linux Foundation.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Rocket, BookOpen, Brain, Cloud, GitBranch, Wrench } from 'lucide-react';
+
+## What Valkey is
+
+Valkey is an in-memory key-value data store: strings, hashes, lists, sets, sorted sets, streams, bitmaps, HyperLogLogs, geospatial indexes, and (via modules) JSON and vectors. If you have ever used Redis, you already know Valkey — the wire protocol (RESP2/RESP3) and the client libraries are the same.
+
+Valkey was forked from Redis 7.2.4 in March 2024 after Redis Inc. switched the project to SSPL/RSAL. A group of long-time maintainers from AWS, Google, Oracle, Ericsson and Snap created Valkey under the Linux Foundation within eight days. Today Valkey is the engine behind AWS ElastiCache, Google Memorystore, Aiven, and many self-hosted deployments worldwide.
+
+<Callout type="info">
+**Latest release**: Valkey 9.1 (May 2026), LTS-track. The 7.2 line is still maintained for conservative deployments.
+</Callout>
+
+## Pick a path
+
+<Cards>
+  <Card icon={<Rocket />} href="/docs/en/quickstart" title="5-minute quickstart">
+    Run Valkey with Docker or a package manager, ping it, store your first key.
+  </Card>
+  <Card icon={<BookOpen />} href="/docs/en/for-beginners" title="For beginners">
+    What an in-memory KV store actually is, when to use one, and what Valkey gives you over a database.
+  </Card>
+  <Card icon={<Brain />} href="/docs/en/for-ai-devs" title="For AI developers">
+    Vector search, semantic cache, and agent memory in one process. Valkey as the AI data layer.
+  </Card>
+  <Card icon={<Cloud />} href="/docs/en/on-cloud" title="On the cloud">
+    Provider matrix: AWS, GCP, Aiven, Oracle, DigitalOcean, and what each one actually gives you.
+  </Card>
+  <Card icon={<GitBranch />} href="/docs/en/versions" title="Versions & roadmap">
+    7.2 / 8.0 / 8.1 / 9.0 / 9.1 — what changed, what's coming, which to pick.
+  </Card>
+  <Card icon={<Wrench />} href="/docs/en/operations" title="Operations">
+    Install, configure, persist, replicate, cluster, secure, observe — in one place.
+  </Card>
+</Cards>
+
+## Why this site
+
+The official Valkey documentation at [valkey.io](https://valkey.io) is excellent but reference-shaped. This site is **community-written**, problem-shaped, and Chinese-first — but with an English mirror because the surrounding ecosystem (and many error messages you will Google) is in English.
+
+If you find a mistake, [open an issue on GitHub](https://github.com/valkey-io/valkey).

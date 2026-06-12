@@ -1,0 +1,130 @@
+---
+title: AI 框架集成：原生 vs 兼容
+description: 哪些 AI 框架原生支持 Valkey、哪些只是 wire 兼容，以及踩坑提醒。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Boxes, Plug } from 'lucide-react';
+
+接 Valkey 时要分清两类集成：**原生支持**（厂商提供了专门的 Valkey 实现并测试过）和**兼容连接**（沿用 Redis 客户端，靠 wire 协议兼容连上 Valkey，但未针对 Valkey 官方测试）。两者都能跑，但原生的更稳、更值得优先选。
+
+## 全景表（2026 年中）
+
+| 框架 / 能力 | 集成方式 | 包 / 类 |
+| --- | --- | --- |
+| LangChain 向量库 | 原生 | `langchain-aws` 的 `ValkeyVectorStore` |
+| Mem0 记忆 | 原生 | `provider: "valkey"` |
+| LangGraph checkpoint | 原生 | `langgraph-checkpoint-aws` 的 `ValkeySaver` / `ValkeyStore` |
+| Strands 会话 | 原生 | `ValkeySessionManager` |
+| MCP Server | 原生 | `awslabs.valkey-mcp-server` |
+| LangChain 缓存 / 历史 | 兼容连接 | langchain-redis 的 Redis 类，URL 指向 Valkey |
+| LlamaIndex | 兼容连接 | `RedisVectorStore` / `RedisChatStore` |
+| Spring AI | 兼容连接 | `RedisVectorStore`（Jedis；TEXT/BM25 可能失效） |
+| Feast | 兼容连接 | `type: redis` → Valkey |
+| Ray | 兼容连接 | `RAY_REDIS_ADDRESS` → Valkey |
+| Celery | 兼容连接 | `broker='redis://'` → Valkey |
+
+<Callout type="warn">
+**通用坑：** 许多集成会自动创建一个 TEXT 字段，这在低于 1.2.0 的 valkey-search 上会失败。解决办法是升级到 valkey-search 1.2.0+（2026 年 3 月），或改用 TAG 字段。
+</Callout>
+
+## 原生集成代码
+
+<Cards>
+<Card icon={<Plug />} title="LangChain ValkeyVectorStore" href="/docs/ai/rag" />
+<Card icon={<Boxes />} title="Mem0 / LangGraph 记忆" href="/docs/ai/agent-memory" />
+</Cards>
+
+### LangChain ValkeyVectorStore（langchain-aws）
+
+底层用 Valkey GLIDE 客户端，不是 redis-py：
+
+```python
+from langchain_aws.vectorstores import ValkeyVectorStore
+from langchain_openai import OpenAIEmbeddings
+
+store = ValkeyVectorStore.from_documents(
+    docs, OpenAIEmbeddings(), valkey_url="valkey://endpoint:6379",
+)
+store.similarity_search("查询", k=4)
+```
+
+### Mem0（valkey provider）
+
+```python
+from mem0 import Memory
+
+m = Memory.from_config({
+    "vector_store": {
+        "provider": "valkey",
+        "config": {
+            "collection_name": "test",
+            "valkey_url": "valkey://localhost:6379",
+            "embedding_model_dims": 1536,
+            "index_type": "hnsw",
+        },
+    }
+})
+m.add([{"role": "user", "content": "记住这个偏好"}], user_id="user_123")
+```
+
+### LangGraph ValkeySaver（langgraph-checkpoint-aws）
+
+```python
+from langgraph_checkpoint_aws import ValkeySaver
+
+with ValkeySaver.from_conn_string("valkey://localhost:6379", ttl_seconds=3600) as cp:
+    graph = builder.compile(checkpointer=cp)
+```
+
+### Strands ValkeySessionManager
+
+社区原生的会话管理器，把 Strands Agent 的会话状态落到 Valkey。
+
+### AWS Labs MCP Server
+
+```json
+{
+  "mcpServers": {
+    "awslabs.valkey-mcp-server": {
+      "command": "uvx",
+      "args": ["awslabs.valkey-mcp-server@latest"],
+      "env": { "VALKEY_HOST": "127.0.0.1", "VALKEY_PORT": "6379" }
+    }
+  }
+}
+```
+
+完整护栏配置见 [MCP Server](/docs/ai/mcp-server)。
+
+## 兼容连接代码
+
+这些用 Redis 客户端连 Valkey，URL 用 `redis://` 即可（wire 兼容）：
+
+```python
+from langchain_redis import RedisCache, RedisChatMessageHistory
+from langchain_core.globals import set_llm_cache
+
+set_llm_cache(RedisCache(redis_url="redis://valkey-host:6379"))
+
+history = RedisChatMessageHistory(
+    session_id="abc", redis_url="redis://valkey-host:6379", ttl=3600,
+)
+```
+
+## 诚实提醒
+
+<Callout type="info">
+**Letta（MemGPT）不是 Valkey 记忆后端。** 它用 Postgres / pgvector 存记忆，把它列进「Valkey 集成」是不准确的。如果你需要 Valkey 原生记忆，选 Mem0 或 LangGraph `ValkeySaver`。
+</Callout>
+
+兼容连接的整体策略是：能用就用，但优先级低于原生实现。涉及向量检索时尤其注意 TEXT 字段那个坑——优先 TAG 字段或升级 valkey-search。
+
+## 下一步
+
+<Steps>
+<Step>更多面向 AI 开发者的指引见[给 AI 开发者](/docs/for-ai-devs)。</Step>
+<Step>原生向量库与记忆的实战见 [RAG](/docs/ai/rag) 与 [Agent 记忆](/docs/ai/agent-memory)。</Step>
+</Steps>

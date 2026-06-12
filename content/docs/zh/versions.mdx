@@ -1,0 +1,82 @@
+---
+title: 版本与路线图
+description: Valkey 7.2 / 8.0 / 8.1 / 9.0 / 9.1 逐版本特性、发布时间线与支持策略
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Valkey 自 2024 年从 Redis 7.2.4 分叉以来，保持着**大约一年一个稳定大版本**的节奏。版本号在分叉后与 Redis **各自演化**——只有 Valkey 7.2 能干净地对应到某个 Redis 版本（7.2.4），8.x / 9.x 都是 Valkey 自己的独立谱系，不要拿 Valkey 8 去对应 Redis 8。
+
+## 发布时间线
+
+| 版本 | 首发 | 头条特性 | 维护至 | 安全支持至 | LTS |
+|---|---|---|---|---|---|
+| **7.2** | 2024-04 | 首个 Valkey 版本，drop-in 兼容 Redis 7.2.4 | 2027-04 | 2029-04 | ✅ |
+| **8.0** | 2024-09 | 异步 I/O 多线程、双通道复制、per-slot 字典、实验性 RDMA | 2027-09 | 2027-09 | — |
+| **8.1** | 2025-03 | 新字典/哈希表，内存省 ~20%；search/bloom/json 模块成熟 | 2028-03 | 2030-03 | ✅ |
+| **9.0** | 2025-10 | 原子槽迁移、集群多数据库、Hash 字段 TTL、>10 亿 RPS 集群 | 2028-10 | 2028-10 | — |
+| **9.1** | 2026-05 | 数据库级 ACL、新 I/O 线程（~210 万 RPS）、`HGETDEL`/`MSETEX`/`CLUSTERSCAN`、JSON 日志 | 当前最新 | — | ✅ |
+
+<Callout type="info">
+**LTS 规律**：`x.1` 系列（7.2、8.1、9.1）的安全支持窗口更长（5 年），适合生产长期锁版本；`x.0`（8.0、9.0）是尝鲜/过渡版。当前生产首选 **9.1**，保守可选 **8.1 LTS**。
+</Callout>
+
+## 逐版本详解
+
+### Valkey 7.2（2024-04）—— 起点
+
+字节级 **drop-in 兼容 Redis 7.2.4**，`INFO` 里 `redis_version` 报 `7.2.4`。本质就是 BSD 协议下的 Redis 7.2.4 加上 Valkey 自己维护的修复。所有从 Redis 来的人，第一步迁到这里零风险。
+
+### Valkey 8.0（2024-09）—— 性能转折点
+
+这是 Valkey 真正拉开与 Redis 差距的一版，工程亮点都来自云厂商的真实诉求：
+
+- **异步 I/O 多线程**：主线程与 I/O 线程并发跑，配合命令批处理，比 Redis 旧的 I/O 线程模型卸载更多工作。AWS r7g 上实测**约 120 万 QPS**（此前约 38 万）。
+- **双通道复制（dual-channel replication）**：全量同步时，RDB 快照和复制积压流**同时**走两条连接传输，把缓冲压力从主库挪到从库，重负载下同步耗时最多砍半。
+- **per-slot 字典**：集群模式下用 16384 个 per-slot 哈希表替代单一全局哈希表，每个 key 省约 24 字节内存（实测 ~20%），且 rehash 只影响单个 slot，延迟毛刺小得多。
+- **实验性 Valkey-over-RDMA**：客户端与服务端直接内存访问，吞吐报告最高 +275%（实验特性，可能变动）。
+
+### Valkey 8.1（2025-03）—— 内存与模块
+
+- 新的内存高效字典 + 新哈希表：常见键值负载**内存最多降 20%**，配合 pipeline 吞吐 +10%。
+- 一等公民的模块生态成型：**valkey-search**（向量检索，Google 主力贡献）、**valkey-bloom**（布隆过滤器，比 Set 省 ~98% 内存）、**valkey-json**（原生 JSON）。
+- AVX2 优化。8.1 是当前推荐的保守 LTS。
+
+### Valkey 9.0（2025-10）—— 集群进化
+
+- **原子槽迁移（atomic slot migration）**：快照式、单命令、fork-and-stream、原子交接，零停机替代逐 key 的 `MIGRATE`。
+- **集群模式下的多数据库**：一个集群上支持编号 DB 命名空间。
+- **Hash 字段过期**：`HEXPIRE` / `HPEXPIRE` / `HEXPIREAT` / `HTTL` / `HPERSIST` 等，给单个 hash field 设 TTL。
+- 性能：相比 8.1 吞吐再 +40%，在约 2000 节点规模实测 **>10 亿 RPS**。
+
+### Valkey 9.1（2026-05）—— 当前最新
+
+- **性能**：单机 **210 万 RPS**（512 字节负载、9 个 I/O 线程、pipeline 深度 10）；`XRANGE`/`XREVRANGE` 快 30%，string `GET` 吞吐 +30%。
+- **新命令**：`HGETDEL`（原子取出并删除 hash field）、`MSETEX`（多 key 设值并共享过期）、`CLUSTERSCAN`（集群范围一致性扫描）。
+- **安全**：**数据库级（编号）ACL**，多租户细粒度隔离；Lua 改为可完全禁用的模块化架构；TLS 证书自动后台热重载、证书 SAN URI 鉴权。
+- **可观测性**：主/IO 线程用量指标；`log-format json` 输出 JSON 结构化日志。
+- 配套的 **Valkey Search 1.2** 同期发布（加入全文 TEXT、聚合）。
+
+## 模块版本对照（valkey-bundle）
+
+模块通过 [valkey-bundle](https://valkey.io/blog/valkey-bundle-one-stop-shop-for-low-latency-modern-applications/) 容器分发，也作为发行版弱依赖打包：
+
+| 模块 | 作用 | 对标 Redis | 首个 GA |
+|---|---|---|---|
+| **valkey-search** | 向量相似检索 + 二级索引 | RediSearch | 2025-05（v1.0），2026-03 v1.2 加全文 |
+| **valkey-bloom** | 布隆过滤器类型 | RedisBloom（仅 `BF.*`） | 2025-04 |
+| **valkey-json** | 原生 JSON 文档 | RedisJSON | 2025-04 |
+| **valkey-ldap** | LDAP/AD 鉴权 | （企业版功能） | 2025-06 |
+
+<Callout type="warn">
+**功能缺口**：Valkey 核心**暂无 TimeSeries 模块**（对应 Redis 的 `TS.*`）。如果你重度依赖 RedisTimeSeries，迁移前要先评估替代方案。
+</Callout>
+
+## 该用哪个版本？
+
+- **新项目**：直接上 **9.1**。
+- **要长期锁版本的生产**：**8.1 LTS** 或 **9.1**（都是 LTS 谱系）。
+- **从 Redis 迁移的第一跳**：先迁到 **7.2**（零风险验证兼容性），再滚动升级。
+- **托管云**：用厂商支持的最高版本——AWS ElastiCache、GCP Memorystore 都已支持到 9.x。
+
+延伸阅读：[分叉的故事](/docs/story/history) · [Redis 还是 Valkey](/docs/migration/redis-vs-valkey) · [多线程原理](/docs/internals/threading)。

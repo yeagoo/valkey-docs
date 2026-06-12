@@ -1,0 +1,72 @@
+---
+title: Valkey for beginners
+description: What an in-memory key-value store is, what Valkey stores, and when to use it instead of (or alongside) a database.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## In-memory KV in one paragraph
+
+A traditional database (Postgres, MySQL, MongoDB) is **disk-first**: it durably writes every change to spinning rust or SSD, then organizes it with indexes for queries. Latency is in single-digit milliseconds at best. An in-memory store like Valkey is **memory-first**: every value lives in RAM, persistence is a background concern, and queries return in microseconds. The cost is that your dataset has to fit in RAM (or be sharded across machines) and that durability requires more thought.
+
+You use Valkey when **latency matters more than dataset size**, or when a relational query plan is overkill for what is really a single key lookup.
+
+## What Valkey stores
+
+Valkey is not "just strings." It is a small toolkit of memory-efficient data structures, each with its own commands:
+
+| Type | Stores | Typical use |
+| --- | --- | --- |
+| String | bytes or numbers up to 512 MB | cached HTML, JSON blobs, counters |
+| Hash | field → value map | user profile, session object |
+| List | ordered, doubly-linked | queues, recent items |
+| Set | unordered, unique | tags, dedup, unique visitors |
+| Sorted Set (ZSet) | unique members with a float score | leaderboards, time-bucketed indexes |
+| Stream | append-only log with consumer groups | event sourcing, light queues |
+| Bitmap | bit-addressable string | feature flags per user id |
+| HyperLogLog | probabilistic cardinality | unique counts in fixed 12 KB |
+| Geospatial | lon/lat with radius queries | nearby search |
+| JSON (module) | document with JSONPath | nested config, semi-structured data |
+| Vector (module) | dense float vectors with HNSW | semantic search, embeddings |
+
+Picking the right structure is the single biggest performance lever in Valkey. A leaderboard built on Sorted Sets is O(log N); the same thing built on Strings + Lua is orders of magnitude slower.
+
+## Common use cases
+
+- **Cache** — a layer in front of Postgres / MySQL / API calls. Standard pattern: read-through with TTL.
+- **Session store** — login state, shopping carts, multi-step form state.
+- **Rate limiting** — `INCR` + `EXPIRE` per (user, window). Or token bucket via Lua.
+- **Leaderboards** — Sorted Sets do all the work.
+- **Real-time feeds** — Streams with consumer groups replace lightweight Kafka use cases.
+- **Pub/sub & WebSocket fanout** — push notifications to N connected clients.
+- **Distributed lock** — `SET key value NX EX 10` plus token-based release. (Redlock for stronger guarantees, but simple SET is enough for most cases.)
+- **Vector + semantic cache** — see [For AI developers](/docs/en/for-ai-devs).
+
+## Relationship to Redis
+
+Valkey is a **BSD-3-Clause fork of Redis 7.2.4**. Practically that means:
+
+- Wire protocol (RESP2/RESP3) is identical.
+- Every Redis client library — redis-py, ioredis, lettuce, jedis, go-redis, StackExchange.Redis — connects unchanged.
+- Commands you know from Redis (`SET`, `GET`, `XADD`, `ZRANGEBYSCORE`, `EVAL`, …) are present and behave the same.
+- The Lua scripting environment is the same; modules built against the Redis Modules API are largely portable.
+
+Where Valkey starts to diverge:
+
+- **RDB version 12+** (Valkey 8 and up) is not readable by old Redis builds.
+- **New commands** like the embedded-keys-aware `OBJECT`, hash field TTLs in 8.0+, and cluster shard groups in 9.0+ may not exist on Redis.
+- **Modules** — Valkey ships its own `valkey-search`, `valkey-bloom`, `valkey-json`, `valkey-ldap`. Redis ships RediSearch, RedisJSON, etc. APIs are largely overlapping but not identical.
+
+For most application code, switching Redis to Valkey is a config change. For operations and tooling, read the [versions page](/docs/en/versions) before upgrading across the 7.4 boundary.
+
+<Callout type="info">
+**Rule of thumb**: if your project is starting today and you have no contractual reason to stay on Redis, pick Valkey. It is BSD-licensed, foundation-governed, and what your cloud provider is likely running anyway.
+</Callout>
+
+## When *not* to use Valkey
+
+- Datasets that exceed practical RAM (TB+) without a clear sharding story — look at disk-backed KV (RocksDB-based) or Cassandra/Scylla.
+- Strong transactional guarantees across many keys — relational databases still win here. Valkey's MULTI/EXEC is optimistic, not ACID across nodes.
+- Complex analytical queries — Valkey is not OLAP.
+
+In practice most teams end up with Postgres or MySQL for the system of record, and Valkey for the hot path in front of it.

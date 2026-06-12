@@ -1,0 +1,10 @@
+{
+  "title": "云上托管",
+  "pages": [
+    "aws",
+    "gcp-memorystore",
+    "aiven-and-others",
+    "china-clouds",
+    "selection"
+  ]
+}

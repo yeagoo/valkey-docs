@@ -1,0 +1,186 @@
+---
+title: Operations overview
+description: Install, configure, persist, replicate, cluster, secure, and observe Valkey — in one mid-length page with copy-pasteable snippets.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+This page is a tour of the operational surface. Each section links to deeper material where it exists.
+
+## Install
+
+Production-recommended paths:
+
+- **Linux**: distribution packages (`apt install valkey-server`, `dnf install valkey`). Service is `valkey-server`.
+- **Container**: official image `valkey/valkey:9.1` (also `:9.1-alpine`).
+- **Source**: `make BUILD_TLS=yes BUILD_WITH_SYSTEMD=yes -j`.
+
+Verify:
+
+```bash
+valkey-server --version
+valkey-cli INFO server | grep -E 'valkey_version|server_name'
+```
+
+## Configure
+
+The default config lives at `/etc/valkey/valkey.conf` (or `/etc/redis/redis.conf` on systems that still use the legacy path).
+
+Production starter config:
+
+```ini
+bind 0.0.0.0 -::*
+port 6379
+protected-mode yes
+tcp-backlog 511
+timeout 0
+tcp-keepalive 60
+
+maxmemory 4gb
+maxmemory-policy allkeys-lru
+
+appendonly yes
+appendfsync everysec
+auto-aof-rewrite-percentage 100
+auto-aof-rewrite-min-size 64mb
+
+save 3600 1 300 100 60 10000
+
+io-threads 4
+io-threads-do-reads yes
+
+logfile /var/log/valkey/valkey-server.log
+loglevel notice
+
+# ACL
+aclfile /etc/valkey/users.acl
+```
+
+`CONFIG SET` lets you change most parameters at runtime. `CONFIG REWRITE` persists them back to the config file.
+
+## Persistence
+
+Two mechanisms, usually combined:
+
+- **RDB**: point-in-time snapshot, compact, slow to recover *to* but fast to recover *from*.
+- **AOF**: append-only log of every write, durable to within `appendfsync` interval (`everysec` recommended).
+
+Combined: AOF for durability, periodic RDB for backups. On startup Valkey prefers AOF if present.
+
+Trigger backups manually:
+
+```bash
+valkey-cli BGSAVE              # RDB snapshot in background
+valkey-cli BGREWRITEAOF        # compact the AOF
+```
+
+## Replication
+
+Set up a replica:
+
+```bash
+# On the replica
+valkey-cli REPLICAOF master.example.com 6379
+# Or in config:
+# replicaof master.example.com 6379
+# masterauth your-master-password
+```
+
+Check status:
+
+```bash
+valkey-cli INFO replication
+# role:slave
+# master_link_status:up
+# master_last_io_seconds_ago:0
+```
+
+For automatic failover, run **Sentinel** (3+ instances, separate from data nodes):
+
+```bash
+valkey-sentinel /etc/valkey/sentinel.conf
+```
+
+Minimal sentinel.conf:
+
+```ini
+port 26379
+sentinel monitor mymaster 10.0.0.1 6379 2
+sentinel down-after-milliseconds mymaster 5000
+sentinel failover-timeout mymaster 30000
+sentinel auth-pass mymaster your-password
+```
+
+## Cluster
+
+For datasets exceeding one machine, run Valkey Cluster (sharded, masterless coordination via gossip).
+
+Create a 3-master 3-replica cluster:
+
+```bash
+valkey-cli --cluster create \
+  10.0.0.1:6379 10.0.0.2:6379 10.0.0.3:6379 \
+  10.0.0.4:6379 10.0.0.5:6379 10.0.0.6:6379 \
+  --cluster-replicas 1
+```
+
+Each node uses two ports: the client port (6379) and the bus port (client + 10000 = 16379). Both must be reachable between all nodes.
+
+Application clients must speak the cluster protocol (handle `MOVED` and `ASK` redirects). Most modern client libraries do this transparently — use `NewClusterClient` instead of `NewClient`.
+
+Use hash tags to co-locate related keys: `{user:42}:profile` and `{user:42}:cart` hash to the same slot, enabling `MGET` and multi-key transactions.
+
+## Security
+
+Defense in depth:
+
+1. **Network** — bind to private interfaces only; never expose 6379 to the internet.
+2. **TLS** — enable `tls-port` and disable plain `port`:
+   ```ini
+   port 0
+   tls-port 6379
+   tls-cert-file /etc/valkey/cert.pem
+   tls-key-file /etc/valkey/key.pem
+   tls-ca-cert-file /etc/valkey/ca.pem
+   tls-auth-clients yes
+   ```
+3. **ACL** — define per-application users with minimal command and key prefix permissions:
+   ```bash
+   ACL SETUSER api on >s3cret ~app:* +@read +@write -@dangerous
+   ```
+4. **Disable risky commands** in production:
+   ```ini
+   rename-command FLUSHALL ""
+   rename-command FLUSHDB  ""
+   rename-command CONFIG   "CONFIG_4f9c2d"
+   ```
+
+## Observability
+
+Built-in:
+
+- `INFO` — overall stats. Pipe a section to your metrics collector.
+- `LATENCY HISTORY` / `LATENCY GRAPH` — per-event latency.
+- `SLOWLOG GET 100` — slowest recent commands.
+- `MEMORY STATS` — memory breakdown.
+- `CLIENT LIST` — connections by IP and command.
+- `COMMAND STATS` — per-command call count and latency (in `INFO commandstats`).
+
+Recommended exporters:
+
+- `valkey_exporter` (fork of redis_exporter) for Prometheus.
+- CloudWatch / Stackdriver agents on managed offerings expose these automatically.
+
+Dashboards worth setting up:
+
+- `used_memory` vs `maxmemory`, fragmentation ratio.
+- Hit ratio: `keyspace_hits / (keyspace_hits + keyspace_misses)`.
+- Connected clients, blocked clients.
+- Replication offset lag.
+- RDB and AOF: last save success, current AOF size, rewrite-in-progress.
+
+## Further reading
+
+- [Reference](/docs/en/reference) — every commonly used command, flag, port, and exit code in one page.
+- [Errors (Chinese)](/docs/zh/errors) — error code dictionary; error names are universal.
+- [Versions](/docs/en/versions) — upgrade paths and support windows.

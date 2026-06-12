@@ -1,0 +1,122 @@
+---
+title: GCP Memorystore for Valkey
+description: Google Cloud 托管 Valkey 的分片架构、节点类型、内置向量检索与计费折扣。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Network, Search, Layers, ShieldCheck } from 'lucide-react';
+
+**Memorystore for Valkey** 于 2025 年 4 月 19 日正式 GA，是 Google Cloud 的托管 Valkey 服务，主打分片（sharded）架构、内置向量检索和零停机伸缩。
+
+## 版本与架构
+
+支持 Valkey 7.2 / 8.0 / 9.0，**默认版本现已是 9.0**。
+
+架构采用分片设计：每个集群由若干主节点（primary）组成，每个主节点可选配副本（replica）。集群规模可在 **1 到 250 个节点**之间，支持**零停机的水平扩容/缩容**（scale in/out）。
+
+<Callout type="info">
+Google 的官方建议是：**优先用更多的小节点，而不是少量大节点**。更细粒度的分片有利于伸缩平滑度、故障影响面控制和负载均衡。
+</Callout>
+
+## 节点类型
+
+| 节点类型 | 定位 |
+| --- | --- |
+| standard | 通用主力 |
+| highmem | 内存密集型工作负载 |
+| custom-pico / micro / mini | 小容量自定义规格 |
+| shared-core-nano | 仅限开发/测试，不建议生产 |
+
+<Callout type="warn">
+shared-core-nano 是共享核心的开发测试规格，不要用于生产负载。
+</Callout>
+
+## 网络：PSC 与多 VPC
+
+Memorystore for Valkey 通过 **Private Service Connect（PSC）** 接入：
+
+<Cards>
+  <Card icon={<Network />} title="Private Service Connect">
+    最多 250 个分片仅需 2 个 IP 加上一个高可用发现端点（HA discovery endpoint），地址占用极少。
+  </Card>
+  <Card icon={<Layers />} title="多 VPC 访问">
+    支持从多个 VPC 访问同一集群，便于跨项目/跨团队共享缓存层。
+  </Card>
+</Cards>
+
+## 可靠性与高级能力
+
+- **99.99% SLA**，RDB + AOF 持久化，托管备份。
+- **跨区域复制**：可复制到最多 2 个次级区域，用于灾备与就近读取。
+- **集成向量检索**：在 10 亿以上向量规模上做到个位数毫秒延迟、99% 以上召回率，并支持混合检索（hybrid search）。
+- **数据结构扩展**：JSON、Bloom 过滤器。
+- **安全**：IAM 鉴权、令牌（token）鉴权、传输层加密（in-transit encryption）。
+
+<Cards>
+  <Card icon={<Search />} title="内置向量检索">
+    无需额外组件即可在 Memorystore 内做向量与混合检索，适合 RAG、推荐与语义搜索。
+  </Card>
+  <Card icon={<ShieldCheck />} title="多重鉴权">
+    IAM 与令牌鉴权并存，叠加传输加密，满足合规要求。
+  </Card>
+</Cards>
+
+## 持久化与灾备策略
+
+Memorystore for Valkey 同时支持 RDB 快照与 AOF 追加日志：
+
+| 机制 | 特点 | 适用 |
+| --- | --- | --- |
+| RDB | 周期性全量快照，恢复快、占用小 | 可容忍少量数据丢失的缓存 |
+| AOF | 记录每条写命令，数据丢失窗口更小 | 对持久性要求更高的场景 |
+
+叠加跨区域复制（最多 2 个次级区域）后，你可以构建"主区域读写 + 次级区域灾备/就近读"的拓扑。注意 AOF 会带来额外开销，并直接进入计费公式。
+
+<Callout type="info">
+跨区域复制适合做读扩展和灾备，但要留意跨区域网络延迟与流量成本；把强一致写集中在主区域，次级区域只做读和故障接管。
+</Callout>
+
+## 计费与折扣
+
+价格由若干因子相乘后按**秒**计费：
+
+```text
+费用 ≈ 节点类型 × 容量 × 副本数 × AOF × 区域（按秒计）
+```
+
+整体定价与 **Memorystore for Redis Cluster 持平**。在此基础上可用承诺使用折扣（Committed Use Discounts, CUD）：
+
+| 承诺期 | 折扣（约） |
+| --- | --- |
+| 1 年 | 约 20% |
+| 3 年 | 约 40% |
+
+<Callout type="info">
+已有的 Redis 版 CUD 可以直接复用到 Memorystore for Valkey，迁移时无需重新承诺。具体价格请以 Google Cloud 官网为准（2026 年中口径）。
+</Callout>
+
+## 伸缩实践：小节点优先
+
+Google 建议"多个小节点优于少数大节点"，落到实践上意味着：
+
+- **故障影响面更小**：单个分片故障只影响整体的一小部分键空间。
+- **伸缩更平滑**：增删节点时数据重分布的粒度更细，抖动更小。
+- **负载更均衡**：键在更多分片间散列，热点风险降低。
+
+但也别走极端——节点过多会增加管理与网络复杂度。从合理的中间值起步，再按真实负载用零停机伸缩调整。
+
+```bash
+# 示意：以零停机方式扩容分片数
+gcloud memorystore instances update my-valkey \
+  --shard-count=12 \
+  --region=us-central1
+```
+
+## 适合谁
+
+- 需要超大规模分片缓存（最多 250 节点）且要求零停机伸缩。
+- 想在缓存层直接做向量/混合检索，省掉独立向量库。
+- 已重度使用 GCP，并希望复用现有 Redis 的 CUD。
+
+继续阅读 [选型与成本](/docs/cloud/selection)，或回到 [云上 Valkey 概览](/docs/on-cloud)。

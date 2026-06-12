@@ -1,0 +1,102 @@
+---
+title: List：队列、栈与最新动态
+description: 用双端链表实现消息队列、固定长度的最新动态，以及可靠的任务流转
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+> List 是一个有序的字符串列表，本质是双端队列：两头都能高效地插入和弹出。靠这个特性，它能同时充当队列、栈和「最近 N 条」的环形缓冲。
+
+## 两头进、两头出
+
+```text
+127.0.0.1:6379> RPUSH queue a b c
+(integer) 3
+127.0.0.1:6379> LPUSH queue z
+(integer) 4
+127.0.0.1:6379> LRANGE queue 0 -1
+1) "z"
+2) "a"
+3) "b"
+4) "c"
+127.0.0.1:6379> LPOP queue
+"z"
+127.0.0.1:6379> RPOP queue
+"c"
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `LPUSH k v...` / `RPUSH k v...` | 从左 / 右压入 |
+| `LPOP k` / `RPOP k` | 从左 / 右弹出 |
+| `LRANGE k 0 -1` | 取区间元素（`-1` 表示末尾） |
+| `LLEN k` | 列表长度 |
+| `LINDEX k 0` | 取第 N 个元素 |
+| `LSET k 0 v` | 修改第 N 个元素 |
+| `LREM k 1 v` | 删除指定值的元素 |
+
+- **队列（FIFO）**：一端 `RPUSH` 入队，另一端 `LPOP` 出队。
+- **栈（LIFO）**：同一端 `LPUSH` + `LPOP`。
+
+## 场景一：固定长度的最新动态
+
+「最近 100 条评论」「最新 50 条日志」用 List 实现最优雅：写入时 `LPUSH`，再用 `LTRIM` 把列表裁剪到固定长度，旧的自动被挤掉。
+
+```text
+127.0.0.1:6379> LPUSH feed "动态3"
+(integer) 1
+127.0.0.1:6379> LPUSH feed "动态2" "动态1"
+(integer) 3
+127.0.0.1:6379> LTRIM feed 0 99
+OK
+127.0.0.1:6379> LRANGE feed 0 2
+1) "动态1"
+2) "动态2"
+3) "动态3"
+```
+
+`LTRIM feed 0 99` 只保留下标 0 到 99，共 100 条。这样列表永远不会无限膨胀。
+
+## 场景二：消息队列（阻塞读取）
+
+普通 `LPOP` 在列表空时立刻返回 `nil`，消费者只能不停轮询，浪费 CPU。`BLPOP` / `BRPOP` 是阻塞版本：列表空时它会挂起等待，直到有新元素或超时。
+
+```text
+127.0.0.1:6379> BRPOP tasks 5
+（阻塞最多 5 秒……生产者 LPUSH 后立刻返回）
+1) "tasks"
+2) "job-1"
+```
+
+最后的 `5` 是超时秒数，`0` 表示一直等下去。生产者照常 `LPUSH tasks job-1` 即可。
+
+## 场景三：可靠队列（不丢任务）
+
+`BRPOP` 有个隐患：消息弹出后若消费者崩溃，任务就丢了。`LMOVE` / `BLMOVE` 能在「弹出」的同时把元素塞进另一个「处理中」列表，实现可靠流转：
+
+```text
+127.0.0.1:6379> LMOVE tasks processing RIGHT LEFT
+"job-1"
+```
+
+这条命令原子地把 `tasks` 右端的元素弹出、压入 `processing` 左端。消费者处理完后再从 `processing` 删掉它；万一崩溃，任务还躺在 `processing` 里，可被重新捞起重试。
+
+<Callout type="info">
+`BLMOVE` 是 `LMOVE` 的阻塞版，是搭建「不丢消息」工作队列的经典组合。如果你需要更完整的确认（ack）、消费组、重投递机制，请直接看 [Stream](/docs/zh/newbie/streams)。
+</Callout>
+
+## 场景四：聊天记录
+
+把每条消息 `RPUSH` 进 `chat:room:1`，`LRANGE chat:room:1 -20 -1` 即可取最近 20 条。配合 `LTRIM` 控制总长度，就是一个轻量聊天历史存储。
+
+<Callout type="warn">
+不要用 `LRANGE k 0 -1` 一次性拉取超长列表，这会阻塞服务。需要全量时请分页（`LRANGE k 0 99`、`LRANGE k 100 199`……）。
+</Callout>
+
+---
+
+## 下一篇
+
+List 允许重复元素且有序。如果你要的是「去重」和「集合运算」，该用 Set 了。
+
+继续阅读 → [Set：去重、标签与集合运算](/docs/zh/newbie/sets)

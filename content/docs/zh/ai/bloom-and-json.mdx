@@ -1,0 +1,128 @@
+---
+title: valkey-bloom 与 valkey-json
+description: 用 valkey-bloom 做去重与去环，用 valkey-json 做 Agent 状态与 RAG 文档。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+除了向量检索，Valkey 还有两个对 AI 工作流很实用的官方模块：`valkey-bloom`（布隆过滤器）和 `valkey-json`（原生 JSON 类型）。两者都在 2025 年 4 月 1 日发布 1.0.0 GA，需要 Valkey 8.0+，并随 valkey-bundle 一起分发。
+
+## valkey-bloom
+
+官方 Rust 模块，提供原生布隆过滤器类型，命令与 RedisBloom 的 `BF.*` 兼容。
+
+<Callout type="warn">
+**只有布隆过滤器。** 不支持 Cuckoo（`CF.*`）、Count-Min Sketch（CMS）、TopK、t-digest。
+</Callout>
+
+### 命令一览
+
+| 命令 | 作用 |
+| --- | --- |
+| `BF.ADD` / `BF.MADD` | 添加一个 / 多个元素 |
+| `BF.EXISTS` / `BF.MEXISTS` | 查询一个 / 多个元素是否可能存在 |
+| `BF.CARD` | 已添加元素的近似数量 |
+| `BF.RESERVE key error_rate capacity [NONSCALING] [EXPANSION n]` | 预创建过滤器并指定误判率与容量 |
+| `BF.INSERT` | 创建并批量插入 |
+| `BF.INFO` | 查看过滤器元信息 |
+
+### AI 场景：去重与去环
+
+最典型的两个用法：
+
+- **RAG 摄取 / 爬虫去重**：在抓取并 embedding 之前，先 `BF.EXISTS url`，如果已见过就跳过，省下重复的 embedding 成本。
+- **Agent 去环**：用「是否见过这个状态」阻止 Agent 陷入循环。
+
+```python
+import valkey
+r = valkey.Valkey()
+
+# 预创建：误判率 1%，容量 100 万
+r.execute_command("BF.RESERVE", "seen:urls", "0.01", "1000000")
+
+def should_fetch(url: str) -> bool:
+    if r.execute_command("BF.EXISTS", "seen:urls", url):
+        return False  # 可能已见过，跳过 fetch + embed
+    r.execute_command("BF.ADD", "seen:urls", url)
+    return True
+```
+
+### 取舍
+
+| 特性 | 说明 |
+| --- | --- |
+| 假阳性 | 可能发生（说「见过」但其实没见过） |
+| 假阴性 | 永不发生（说「没见过」就一定没见过） |
+| 删除 | 不支持 |
+| 内存 | 比等价的 Set 节省 93%～98% |
+
+布隆过滤器换内存的代价是「偶尔误判已存在」。对去重场景，最坏结果是漏处理极少量新元素，通常完全可接受。
+
+## valkey-json
+
+官方 C++/RapidJSON 模块，提供原生 JSON 类型，与 RedisJSON 兼容（RDB 与 RedisJSON 1.0.8+ 兼容）。支持增强版 JSONPath：`$`、`$..`、`[*]`、切片，以及过滤器 `[?(@.price < 10)]`。
+
+### 命令一览
+
+| 命令 | 作用 |
+| --- | --- |
+| `JSON.SET` / `JSON.GET` | 写入 / 读取（按 JSONPath） |
+| `JSON.NUMINCRBY` | 原子地给数值字段加值 |
+| `JSON.ARRAPPEND` | 往数组字段追加元素 |
+| `JSON.DEL` | 删除某个路径 |
+
+### AI 场景：Agent 草稿板
+
+把 Agent 的状态放在一个 JSON 文档里，对字段做原子更新——`JSON.NUMINCRBY` 累加轮次计数，`JSON.ARRAPPEND` 追加工具调用日志：
+
+```python
+import json
+r.execute_command("JSON.SET", "agent:run:42", "$", json.dumps({
+    "turn": 0,
+    "tool_calls": [],
+    "status": "running",
+}))
+
+# 每一轮：轮次 +1，记录一次工具调用
+r.execute_command("JSON.NUMINCRBY", "agent:run:42", "$.turn", "1")
+r.execute_command("JSON.ARRAPPEND", "agent:run:42", "$.tool_calls",
+                 json.dumps({"name": "search", "args": "valkey"}))
+```
+
+### AI 场景：RAG 文档
+
+把 chunk 文本、元数据和向量放在一个 JSON 键里，一处读取、原子更新：
+
+```python
+r.execute_command("JSON.SET", "doc:1", "$", json.dumps({
+    "text": "Valkey 是 BSD-3 协议的内存数据库……",
+    "metadata": {"source": "docs", "lang": "zh"},
+    "embedding": "[0.1,0.2,0.3]",  # 注意：JSON 里向量是字符串
+}))
+```
+
+## 在 JSON 上叠加向量检索
+
+valkey-search 可以直接索引 JSON 键。用 `ON JSON` 配合 JSONPath 别名建索引：
+
+```text
+FT.CREATE ragIndex ON JSON
+  SCHEMA
+    $.embedding AS embedding VECTOR HNSW 6 TYPE FLOAT32 DIM 3 DISTANCE_METRIC COSINE
+    $.metadata.lang AS lang TAG
+```
+
+<Callout type="warn">
+JSON 里的向量必须是「带方括号的 JSON 字符串」，不能是原生数组。详见 [valkey-search](/docs/ai/vector-search) 的 JSON 索引一节。
+</Callout>
+
+这样一个 JSON 文档同时承载了 RAG 的文本、元数据和可检索向量。
+
+## 相关阅读
+
+<Steps>
+<Step>向量索引细节见 [valkey-search](/docs/ai/vector-search)。</Step>
+<Step>把 JSON 文档接进检索链路见 [RAG 架构](/docs/ai/rag)。</Step>
+</Steps>

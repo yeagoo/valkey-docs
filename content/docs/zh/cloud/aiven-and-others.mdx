@@ -1,0 +1,120 @@
+---
+title: Aiven、Oracle、DigitalOcean、Stackhero 与 Azure
+description: 中小厂商与多云托管 Valkey 选项，以及在 Azure 上运行 Valkey 的现实路径。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Gift, Server, Database, ShieldCheck } from 'lucide-react';
+
+除了三大超大规模云，还有一批厂商提供托管 Valkey，各有侧重：免费层、多云一面板、欧盟合规、独占私有 VM 等。Azure 则是个特例——它没有原生托管 Valkey。
+
+## Aiven for Valkey
+
+Aiven 的命名历经 Redis → Caching → Valkey，纯粹是出于许可证考量。Aiven 曾公开迁移了约 **15,000 台 Redis 服务器**。
+
+- **Aiven for Caching** 冻结在 Redis 7.2.4。
+- **Aiven for Valkey** 提供相同的功能、套餐与价格，只是引擎换成 Valkey。
+
+### 免费层
+
+<Card icon={<Gift />} title="Aiven 免费层">
+1 台专用 VM、1 CPU、1GB 内存、单节点，无需信用卡，部署在 AWS 部分区域。空闲时自动断电（适合原型验证，不适合生产）。已包含加密、备份、监控和 Terraform 支持。
+</Card>
+
+### 付费套餐
+
+| 套餐 | 起步价（约） | 规格 |
+| --- | --- | --- |
+| Hobbyist | 约 $19/月 | 1GB / 1 CPU |
+| Startup | 约 $60/月 | 更高规格 |
+
+Aiven 的核心卖点是**多云一面板**：在同一个控制台里管理 AWS / GCP / Azure 上的实例。价格为 2026 年中参考值，以官网为准。
+
+## Oracle OCI Cache
+
+OCI Cache 的 Valkey 引擎已 GA。你可以选择 Valkey 7.2 引擎，后续还有 **Valkey 8（带 JSON 与 ValkeySearch）**。
+
+<Callout type="info">
+OCI Cache 的计费与 Redis 完全相同：按**内存容量 + 节点数**计费，**而不是按核数**。Oracle 是 Valkey 的创始赞助方之一。
+</Callout>
+
+## DigitalOcean Managed Caching for Valkey
+
+DigitalOcean 于 2025 年推出，取代了原来的 "Managed Redis"。定价简单清晰，且**各数据中心统一价**：
+
+| 形态 | 规格 | 价格（约） |
+| --- | --- | --- |
+| 单节点 | 1GiB | $15/月起 |
+| 高可用集群 | 2GiB / 1 vCPU 主节点 | $30/月起 |
+| HA 备用节点 | 对等 standby | 另加 $30/月 |
+
+<Callout type="info">
+HA 集群的主节点与备用节点分别计价，因此一套高可用部署大约是 $30 + $30。跨数据中心采用统一定价（flat pricing）。
+</Callout>
+
+## Stackhero Valkey
+
+Stackhero 主打**独占私有 VM**（非多租户），约 5 分钟即可完成部署：
+
+<Cards>
+  <Card icon={<Server />} title="独占资源">
+    专用私有 VM，不与其他租户共享，性能更可预测。
+  </Card>
+  <Card icon={<Database />} title="开箱即用">
+    捆绑 Redis Commander 网页 UI，支持一键升级。
+  </Card>
+  <Card icon={<ShieldCheck />} title="欧盟合规">
+    GDPR、ISO 27001，对欧盟数据驻留友好。
+  </Card>
+</Cards>
+
+价格未在文档页列出，需查看其独立定价页。
+
+## Azure：没有原生托管 Valkey
+
+这一点务必注意：**Azure 目前没有原生托管 Valkey 服务**。它提供的是 **Azure Managed Redis**（已 GA，与 Redis Inc. 合作，2026 年加入向量检索、语义缓存、RAG 与 agent memory 等能力）。
+
+如果你坚持要在 Azure 上跑 Valkey，现实路径是**在 AKS 上自管**——Microsoft 官方发布了一份 Valkey-on-AKS 参考架构。
+
+<Callout type="warn">
+在 Azure 上若想要"全托管 + 开源 Valkey"，目前无法两全：要么接受 Azure Managed Redis（托管但是 Redis），要么在 AKS 上自管 Valkey（开源但需自己运维）。
+</Callout>
+
+## 横向速览
+
+把这几家放在一起，差异一目了然（均为 2026 年中口径，以各官网为准）：
+
+| 厂商 | 最大亮点 | 起步价（约） | 注意点 |
+| --- | --- | --- | --- |
+| Aiven | 多云一面板 + 免费层 | 免费 / $19 起 | 免费层空闲断电，仅原型 |
+| OCI Cache | 按内存+节点计费 | 控制台报价 | 与 Redis 同价 |
+| DigitalOcean | 定价简单透明 | $15 / $30 | HA 主备分别计价 |
+| Stackhero | 独占 VM + EU 合规 | 独立定价页 | 价格需另查 |
+| Azure | 无原生 Valkey | — | 只能 AKS 自管 |
+
+<Callout type="info">
+这些厂商普遍跟随 Valkey 上游版本，并默认包含加密、备份与监控。中小团队和欧盟数据驻留场景，往往能在这里找到比三大云更省心或更合规的选项。
+</Callout>
+
+## 免费层与试用的正确用法
+
+Aiven 免费层非常适合做这几件事，但都不该用于生产：
+
+- 验证客户端 SDK 与 Valkey 的兼容性。
+- 跑一段功能/集成测试，确认数据结构和命令行为符合预期。
+- 用 Terraform 把基础设施代码先在免费实例上调通，再平移到付费规格。
+
+<Callout type="warn">
+免费层是单节点、空闲自动断电、无 SLA，绝不要承载真实生产流量。验证完成后再升级到 Hobbyist/Startup 或其他厂商的高可用方案。
+</Callout>
+
+## 怎么选
+
+- 想要免费试用或多云统一管理：**Aiven**。
+- 已在 Oracle 生态、按内存计费更划算：**OCI Cache**。
+- 简单透明定价、小型项目：**DigitalOcean**。
+- 欧盟合规 + 独占 VM：**Stackhero**。
+- 在 Azure 上：现实是 **Azure Managed Redis**，或 AKS 自管 Valkey。
+
+继续阅读 [选型与成本](/docs/cloud/selection)，或回到 [云上 Valkey 概览](/docs/on-cloud)。

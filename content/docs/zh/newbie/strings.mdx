@@ -1,0 +1,133 @@
+---
+title: String：缓存、计数器与分布式锁
+description: 用最基础的 String 类型搞定缓存读写、原子计数器和一把简单可靠的分布式锁
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+> String 是 Valkey 里最基础的类型。别被名字骗了，它能存的不只是文本：JSON、序列化对象、数字、甚至二进制图片都行，单个值最大 512 MB。这一篇用 5 分钟带你掌握三个高频场景：缓存、计数器、分布式锁。
+
+## 最基本的读写
+
+```text
+127.0.0.1:6379> SET user:1:name "小明"
+OK
+127.0.0.1:6379> GET user:1:name
+"小明"
+127.0.0.1:6379> STRLEN user:1:name
+(integer) 6
+127.0.0.1:6379> APPEND user:1:name " 同学"
+(integer) 13
+```
+
+注意 `STRLEN` 返回的是字节数，一个中文字（UTF-8）占 3 字节，所以「小明」是 6。
+
+## 缓存：带过期时间的写入
+
+缓存的精髓在于「过期」。你可以在 `SET` 时直接带上过期参数，避免「写入」和「设过期」两步操作之间出意外。
+
+```text
+127.0.0.1:6379> SET cache:home "<html>...</html>" EX 60
+OK
+127.0.0.1:6379> TTL cache:home
+(integer) 58
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `SET k v EX 60` | 写入并设置 60 秒后过期 |
+| `SET k v PX 500` | 写入并设置 500 毫秒后过期 |
+| `SETEX k 60 v` | 等价于 `SET k v EX 60`（老写法） |
+| `SETNX k v` | 仅当 key 不存在时写入（返回 1/0） |
+| `GETSET k v` | 写入新值并返回旧值（已可用 `SET ... GET` 替代） |
+| `GETDEL k` | 读出值并立刻删除该 key |
+
+<Callout type="info">
+`GETDEL`（原子地「读取并删除」）特别适合「一次性令牌」「验证码」这类用完即焚的场景。
+</Callout>
+
+## 计数器：原子自增
+
+这是 String 最被低估的能力。Valkey 单线程执行命令，所以 `INCR` 这类操作天然原子，不会出现两个请求同时 +1 却只加了 1 的并发 bug。
+
+```text
+127.0.0.1:6379> SET page:views 0
+OK
+127.0.0.1:6379> INCR page:views
+(integer) 1
+127.0.0.1:6379> INCRBY page:views 100
+(integer) 101
+127.0.0.1:6379> DECR page:views
+(integer) 100
+127.0.0.1:6379> INCRBYFLOAT account:balance 9.9
+"9.9"
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `INCR k` | 加 1 |
+| `DECR k` | 减 1 |
+| `INCRBY k n` | 加 n（整数） |
+| `DECRBY k n` | 减 n（整数） |
+| `INCRBYFLOAT k 1.5` | 加浮点数 |
+
+用它做文章阅读量、限流计数、库存扣减都很合适。
+
+## 分布式锁：一行命令拿锁
+
+最常见的锁就是「带过期的 SETNX」，一条命令搞定：
+
+```text
+127.0.0.1:6379> SET lock:order:42 "client-A" EX 10 NX
+OK
+127.0.0.1:6379> SET lock:order:42 "client-B" EX 10 NX
+(nil)
+```
+
+- `NX` 保证只有第一个客户端能拿到锁；
+- `EX 10` 保证即使持锁者崩溃，10 秒后锁也会自动释放，不会死锁。
+
+<Callout type="warn">
+**释放锁要小心！** 不能简单 `DEL lock:order:42`，因为你的锁可能已超时过期、被别人重新持有，这时你的 `DEL` 会误删别人的锁。正确做法是「比对值再删除」，这必须原子完成——用一段 Lua 脚本（先 `GET` 比对再 `DEL`），详见[脚本与函数](/docs/zh/newbie/scripting-and-functions)。
+</Callout>
+
+## 批量操作：少几次网络往返
+
+```text
+127.0.0.1:6379> MSET k1 a k2 b k3 c
+OK
+127.0.0.1:6379> MGET k1 k2 k3
+1) "a"
+2) "b"
+3) "c"
+```
+
+Valkey 9.1 新增了 `MSETEX`，可以在一条命令里批量写入并统一设置过期时间，省去逐个 `EXPIRE`：
+
+```text
+127.0.0.1:6379> MSETEX 30 sess:a tokenA sess:b tokenB
+OK
+```
+
+## 进阶：把 String 当位图用
+
+String 还能按位读写，用极小的内存表达海量布尔状态（比如「用户今天是否签到」）。
+
+```text
+127.0.0.1:6379> SETBIT sign:2026-06-13 1001 1
+(integer) 0
+127.0.0.1:6379> GETBIT sign:2026-06-13 1001
+(integer) 1
+127.0.0.1:6379> BITCOUNT sign:2026-06-13
+(integer) 1
+```
+
+`BITCOUNT` 数出有多少位是 1，可用于统计「今日签到总人数」。1 亿用户的签到状态只占约 12 MB。
+
+---
+
+## 下一篇
+
+存单个值用 String，存「一个对象的多个字段」就该换 Hash 了。
+
+继续阅读 → [Hash：存对象的最佳选择](/docs/zh/newbie/hashes)

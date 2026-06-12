@@ -1,0 +1,112 @@
+---
+title: 给 Valkey 接一个 MCP Server
+description: 用 AWS Labs 原生 MCP Server 让 Claude / Cursor 直接操作 Valkey，并加上生产级护栏。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+MCP（Model Context Protocol）让 AI 客户端（Claude Desktop、Cursor 等）通过标准协议调用外部工具。给 Valkey 接一个 MCP Server，Agent 就能直接读写键、查向量、管理缓存。
+
+## AWS Labs 原生 Server
+
+AWS Labs 提供原生的 `awslabs.valkey-mcp-server`（基于 valkey-py），用 `uvx` 一行拉起：
+
+```json
+{
+  "mcpServers": {
+    "awslabs.valkey-mcp-server": {
+      "command": "uvx",
+      "args": ["awslabs.valkey-mcp-server@latest"],
+      "env": {
+        "VALKEY_HOST": "127.0.0.1",
+        "VALKEY_PORT": "6379"
+      }
+    }
+  }
+}
+```
+
+<Callout type="info">
+也可以用 `redis/mcp-redis`（通过 wire 兼容连接 Valkey）。但既然有官方原生实现，优先用 `awslabs.valkey-mcp-server`。
+</Callout>
+
+## 它暴露什么
+
+这个 Server 把 Valkey 的常用操作包装成 MCP 工具：字符串 / Hash / List / Set / Sorted Set 的读写、键管理与 TTL、以及向量检索相关命令。Agent 可以「记住用户偏好」「查相关文档」「读写会话状态」，全部经由这一个 Server。
+
+## 接入客户端
+
+<Tabs items={['Claude Desktop', 'Cursor']}>
+<Tab value="Claude Desktop">
+编辑 `claude_desktop_config.json`（macOS 在 `~/Library/Application Support/Claude/`），把上面的 `mcpServers` 块粘进去，重启 Claude Desktop。
+</Tab>
+<Tab value="Cursor">
+在 Cursor 的 MCP 设置（`~/.cursor/mcp.json` 或项目级 `.cursor/mcp.json`）里加入同样的 `mcpServers` 配置。
+</Tab>
+</Tabs>
+
+## 生产级护栏
+
+把一个能执行任意命令的 MCP Server 暴露给 LLM 是有风险的——模型可能误删键、跑全表扫描、或泄露其他租户数据。生产环境务必加护栏。
+
+<Callout type="warn">
+默认配置适合本地实验。任何接入真实数据的部署，下面五条都应落实。
+</Callout>
+
+<Steps>
+<Step>
+**只读 ACL 用户。** 为 MCP 单独建一个权限最小的 Valkey 用户，只授予必要命令。
+
+```text
+ACL SETUSER mcp on >strong-password ~app:* +@read +@hash +ft.search
+```
+</Step>
+<Step>
+**拒绝危险命令。** 显式禁掉 `FLUSHALL` / `FLUSHDB` / `KEYS` / `CONFIG` 等。
+
+```text
+ACL SETUSER mcp -flushall -flushdb -keys -config -shutdown
+```
+</Step>
+<Step>
+**键模式作用域。** 用 ACL 的键模式把 MCP 限制在专属前缀内，避免越权访问其他业务的键。
+
+```text
+ACL SETUSER mcp ~agent:* ~cache:*
+```
+</Step>
+<Step>
+**审计日志。** 记录 MCP 经手的每一条命令（操作者、键、时间），便于事后追溯异常行为。
+</Step>
+<Step>
+**连接池与超时。** 给 Server 配置连接池上限和命令超时，防止失控的 Agent 循环把连接打满或拖垮节点。
+</Step>
+</Steps>
+
+把对应的受限凭据写进 Server 环境变量：
+
+```json
+{
+  "mcpServers": {
+    "awslabs.valkey-mcp-server": {
+      "command": "uvx",
+      "args": ["awslabs.valkey-mcp-server@latest"],
+      "env": {
+        "VALKEY_HOST": "valkey-prod.internal",
+        "VALKEY_PORT": "6379",
+        "VALKEY_USERNAME": "mcp",
+        "VALKEY_PASSWORD": "strong-password"
+      }
+    }
+  }
+}
+```
+
+## 相关阅读
+
+<Steps>
+<Step>ACL、TLS 与最小权限的完整配置见[安全](/docs/security)。</Step>
+<Step>让 Agent 借 MCP 读写记忆，见 [Agent 记忆](/docs/ai/agent-memory)。</Step>
+</Steps>

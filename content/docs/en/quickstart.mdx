@@ -1,0 +1,102 @@
+---
+title: 5-minute quickstart
+description: Install Valkey, ping it, store a key. End-to-end in five minutes.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Pick one install method
+
+### Docker (fastest)
+
+```bash
+docker run -d --name valkey -p 6379:6379 valkey/valkey:9.1
+```
+
+For persistence:
+
+```bash
+docker run -d --name valkey \
+  -p 6379:6379 \
+  -v valkey-data:/data \
+  valkey/valkey:9.1 \
+  valkey-server --appendonly yes
+```
+
+### Linux package managers
+
+Debian / Ubuntu (24.04+):
+
+```bash
+sudo apt update && sudo apt install valkey-server valkey-tools
+sudo systemctl enable --now valkey-server
+```
+
+Fedora / RHEL 9+:
+
+```bash
+sudo dnf install valkey
+sudo systemctl enable --now valkey
+```
+
+<Callout type="info">
+On Debian/Ubuntu 24.04+ and Fedora 40+, the `redis` package is now a transitional package that pulls Valkey. You can install either name.
+</Callout>
+
+### macOS
+
+```bash
+brew install valkey
+brew services start valkey
+```
+
+### From source
+
+```bash
+git clone https://github.com/valkey-io/valkey
+cd valkey && git checkout 9.1
+make BUILD_TLS=yes -j
+sudo make install
+valkey-server --daemonize yes
+```
+
+## Ping it
+
+```bash
+valkey-cli ping
+# PONG
+```
+
+Store and read a key:
+
+```bash
+valkey-cli SET hello world
+valkey-cli GET hello
+# "world"
+```
+
+## Check what you actually got
+
+```bash
+valkey-cli INFO server | head -20
+```
+
+You will see something like:
+
+```
+# Server
+redis_version:7.2.4
+valkey_version:9.1.0
+server_name:valkey
+redis_mode:standalone
+os:Linux 6.5.0 x86_64
+```
+
+`redis_version` stays pinned at 7.2.4 forever — that is **on purpose**, so older client libraries that probe `redis_version` to gate features keep working. The real version is in `valkey_version` and `server_name`.
+
+## Next steps
+
+- [For beginners](/docs/en/for-beginners) — concepts, when to reach for Valkey
+- [Operations overview](/docs/en/operations) — production setup
+- [Reference](/docs/en/reference) — commands, ports, config
+- [Errors](/docs/zh/errors) — Chinese version; the error names are the same

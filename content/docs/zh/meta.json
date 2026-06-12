@@ -1,0 +1,30 @@
+{
+  "title": "Valkey 文档",
+  "pages": [
+    "index",
+    "---新手入门---",
+    "quickstart",
+    "for-beginners",
+    "newbie",
+    "---场景与实战---",
+    "for-ai-devs",
+    "ai",
+    "on-cloud",
+    "cloud",
+    "migration",
+    "---运维与生态---",
+    "operations",
+    "replication-ha",
+    "cluster",
+    "security",
+    "observability",
+    "---深入原理---",
+    "internals",
+    "versions",
+    "---参考---",
+    "reference",
+    "errors",
+    "---故事与前沿---",
+    "story"
+  ]
+}

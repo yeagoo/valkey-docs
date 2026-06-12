@@ -1,0 +1,197 @@
+---
+title: Reference
+description: Valkey commands, configuration, URIs, ports, and exit codes — quick lookup.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Commands by category
+
+### String (KV)
+
+| Command | Purpose |
+| --- | --- |
+| `SET key value [EX sec] [NX\|XX]` | Set value, optional TTL and existence flag |
+| `GET key` | Read |
+| `INCR / DECR key` | Atomic increment / decrement |
+| `MSET k1 v1 k2 v2` | Bulk set |
+| `GETEX key EX sec` | Read and refresh TTL |
+| `STRLEN key` | Length |
+
+### Hash
+
+| Command | Purpose |
+| --- | --- |
+| `HSET key f1 v1 f2 v2` | Set fields |
+| `HGET / HMGET / HGETALL` | Read fields |
+| `HEXPIRE key sec FIELDS n f1 ...` | Field-level TTL (8.0+) |
+| `HINCRBY key field n` | Increment field |
+
+### List
+
+| Command | Purpose |
+| --- | --- |
+| `LPUSH / RPUSH key v` | Push left / right |
+| `LPOP / RPOP key [count]` | Pop |
+| `BLPOP / BRPOP key timeout` | Blocking pop |
+| `LRANGE key start stop` | Range read |
+| `LMOVE src dst LEFT RIGHT` | Atomic move between lists |
+
+### Set
+
+| Command | Purpose |
+| --- | --- |
+| `SADD / SREM key m` | Add / remove |
+| `SMEMBERS key` | All members |
+| `SINTER / SUNION / SDIFF` | Set operations |
+| `SRANDMEMBER key [count]` | Random member |
+
+### Sorted Set (ZSet)
+
+| Command | Purpose |
+| --- | --- |
+| `ZADD key score member` | Add |
+| `ZRANGE key 0 -1 [WITHSCORES]` | Range |
+| `ZRANGEBYSCORE key min max` | By score |
+| `ZINCRBY key n member` | Increment score |
+| `ZPOPMIN / ZPOPMAX key` | Pop extremes |
+
+### Stream
+
+| Command | Purpose |
+| --- | --- |
+| `XADD key * field value` | Append entry |
+| `XREAD COUNT n STREAMS key id` | Read |
+| `XGROUP CREATE key grp $` | Create consumer group |
+| `XREADGROUP GROUP grp consumer ...` | Group read |
+| `XACK key grp id` | Acknowledge |
+
+### Server
+
+| Command | Purpose |
+| --- | --- |
+| `PING` | Liveness probe |
+| `INFO [section]` | Runtime info |
+| `CONFIG GET / SET param` | Dynamic configuration |
+| `CLIENT LIST / KILL` | Connection management |
+| `DBSIZE` | Current DB key count |
+| `FLUSHDB / FLUSHALL` | Wipe (use with care) |
+
+### Cluster
+
+| Command | Purpose |
+| --- | --- |
+| `CLUSTER INFO` | Cluster status |
+| `CLUSTER NODES` | Node list |
+| `CLUSTER SLOTS / SHARDS` | Slot distribution |
+| `CLUSTER COUNTKEYSINSLOT slot` | Keys in a slot |
+| `CLUSTER FAILOVER` | Manual failover |
+
+### ACL
+
+| Command | Purpose |
+| --- | --- |
+| `ACL LIST` | All users |
+| `ACL SETUSER name on >pwd ~prefix:* +@read` | Create / modify |
+| `ACL WHOAMI` | Current identity |
+| `ACL CAT` | Command categories |
+
+## Connection URI schemes
+
+| Scheme | Meaning |
+| --- | --- |
+| `redis://` | Plain TCP (compat) |
+| `rediss://` | TLS TCP (compat) |
+| `valkey://` | Plain TCP (preferred for new projects) |
+| `valkeys://` | TLS TCP (preferred for new projects) |
+| `unix://` | Unix socket |
+
+Example:
+
+```
+valkeys://default:pass@node-1.example.com:6379/0?timeout=2s
+```
+
+Most modern client libraries accept `valkey://`; older versions can still use `redis://` against a Valkey server.
+
+## Common valkey.conf parameters
+
+| Parameter | Meaning | Typical |
+| --- | --- | --- |
+| `port` | Listen port | 6379 |
+| `bind` | Interfaces | 127.0.0.1 / 0.0.0.0 |
+| `protected-mode` | Loopback protection | yes |
+| `requirepass` | Legacy password (prefer ACL) | - |
+| `maxmemory` | Memory cap | 4gb |
+| `maxmemory-policy` | Eviction strategy | allkeys-lru |
+| `appendonly` | AOF on/off | yes |
+| `appendfsync` | AOF fsync | everysec |
+| `save` | RDB snapshot triggers | `3600 1 300 100` |
+| `cluster-enabled` | Enable cluster mode | no |
+| `replica-read-only` | Read-only replicas | yes |
+| `io-threads` | I/O thread count | 4 |
+| `tls-port` | TLS port | 6379 |
+
+`maxmemory-policy` options: `noeviction`, `allkeys-lru`, `allkeys-lfu`, `volatile-lru`, `volatile-lfu`, `allkeys-random`, `volatile-random`, `volatile-ttl`.
+
+## valkey-cli flags
+
+| Flag | Purpose |
+| --- | --- |
+| `-h host -p port` | Target |
+| `-a password` | Password |
+| `--user name` | ACL user |
+| `-n db` | Select DB |
+| `-c` | Cluster mode (follow MOVED) |
+| `--tls` | Enable TLS |
+| `--scan --pattern 'user:*'` | Iterate keys (prefer over KEYS in prod) |
+| `--bigkeys` | Find largest keys |
+| `--memkeys` | Find keys by memory |
+| `--latency` | Live latency |
+| `--latency-history` | Periodic latency |
+| `--stat` | Compact runtime stats |
+| `-x` | Read last argument from stdin (pipe pattern) |
+| `--rdb dump.rdb` | Download RDB |
+
+## INFO sections
+
+| Section | Contents |
+| --- | --- |
+| `server` | Version, uptime, OS |
+| `clients` | Connected / blocked |
+| `memory` | Usage, fragmentation |
+| `persistence` | RDB / AOF status |
+| `stats` | Total commands, hit rate |
+| `replication` | Role, offset |
+| `cpu` | CPU usage |
+| `commandstats` | Per-command count / latency |
+| `cluster` | Cluster enabled |
+| `keyspace` | Per-DB key counts |
+
+`INFO server` reports both `redis_version` (frozen for client compatibility) and `valkey_version` (the real one).
+
+## Port conventions
+
+| Port | Purpose |
+| --- | --- |
+| 6379 | Client |
+| 16379 | Cluster bus (client port + 10000) |
+| 26379 | Sentinel |
+| 7443 | TLS client (used by some managed providers) |
+
+Cluster mode requires both ports open between every pair of nodes.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Normal shutdown |
+| 1 | Startup failure (bad config, port in use, permissions) |
+| 130 | SIGINT received |
+| 143 | SIGTERM received |
+
+`valkey-cli` follows the same conventions to play nicely with shell scripts.
+
+<Callout type="info">
+Full command reference at [valkey.io/commands](https://valkey.io/commands).
+</Callout>

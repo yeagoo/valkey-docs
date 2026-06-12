@@ -1,0 +1,131 @@
+---
+title: Hash：存对象的最佳选择
+description: 用 Hash 把一个对象的多个字段存进一个 key，还能给单个字段单独设过期
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+> 如果你想把「用户资料」存进 Valkey，用很多个 String（`user:1:name`、`user:1:age`……）既零散又难维护。Hash 就是为此而生：一个 key 里装一张「字段 → 值」的小表，像一个对象。
+
+## 基本读写
+
+```text
+127.0.0.1:6379> HSET user:1 name 小明 age 25 city 北京
+(integer) 3
+127.0.0.1:6379> HGET user:1 name
+"小明"
+127.0.0.1:6379> HMGET user:1 name city
+1) "小明"
+2) "北京"
+127.0.0.1:6379> HGETALL user:1
+1) "name"
+2) "小明"
+3) "age"
+4) "25"
+5) "city"
+6) "北京"
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `HSET k f1 v1 f2 v2` | 设置一个或多个字段 |
+| `HGET k f` | 取单个字段 |
+| `HMGET k f1 f2` | 批量取多个字段 |
+| `HGETALL k` | 取出全部字段和值 |
+| `HDEL k f` | 删除字段 |
+| `HEXISTS k f` | 字段是否存在（1/0） |
+| `HKEYS k` / `HVALS k` | 取所有字段名 / 所有值 |
+| `HLEN k` | 字段数量 |
+
+## 字段级自增
+
+和 String 的 `INCR` 一样，Hash 的字段也能原子自增，常用于计数类对象：
+
+```text
+127.0.0.1:6379> HINCRBY user:1 login_count 1
+(integer) 1
+127.0.0.1:6379> HINCRBY user:1 login_count 1
+(integer) 2
+```
+
+## 场景一：购物车
+
+购物车天然是「商品 ID → 数量」的映射，用 Hash 再合适不过。加购就是字段自增，删除就是 `HDEL`：
+
+```text
+127.0.0.1:6379> HINCRBY cart:user:1 sku:1001 2
+(integer) 2
+127.0.0.1:6379> HINCRBY cart:user:1 sku:2002 1
+(integer) 1
+127.0.0.1:6379> HGETALL cart:user:1
+1) "sku:1001"
+2) "2"
+3) "sku:2002"
+4) "1"
+127.0.0.1:6379> HDEL cart:user:1 sku:2002
+(integer) 1
+```
+
+## 安全遍历：HSCAN
+
+千万别在大 Hash 上直接 `HGETALL`——如果字段成千上万，会阻塞整个服务（Valkey 命令是单线程执行的）。用 `HSCAN` 游标式分批取：
+
+```text
+127.0.0.1:6379> HSCAN user:1 0 COUNT 100
+1) "0"
+2) 1) "name"
+   2) "小明"
+   ...
+```
+
+返回的第一项是下次的游标，为 `0` 时表示遍历结束。
+
+## Valkey 9.1：读完即删
+
+`HGETDEL` 原子地「取出字段值并删除该字段」，适合「领取一次性奖励」「弹出待处理项」：
+
+```text
+127.0.0.1:6379> HGETDEL user:1 FIELDS 1 reward
+1) "100coins"
+127.0.0.1:6379> HEXISTS user:1 reward
+(integer) 0
+```
+
+## Valkey 9.0 亮点：字段级 TTL
+
+过去 Hash 只能整个 key 过期，单个字段无法单独过期。Valkey 9.0 起补上了这一能力——你可以给某个字段设独立的存活时间，到期后该字段自动消失，其他字段不受影响。
+
+```text
+127.0.0.1:6379> HSET sess:1 token abc role admin
+(integer) 2
+127.0.0.1:6379> HEXPIRE sess:1 60 FIELDS 1 token
+1) (integer) 1
+127.0.0.1:6379> HTTL sess:1 FIELDS 1 token
+1) (integer) 58
+127.0.0.1:6379> HPERSIST sess:1 FIELDS 1 token
+1) (integer) 1
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `HEXPIRE k 秒 FIELDS n f...` | 给字段设相对过期（秒） |
+| `HPEXPIRE k 毫秒 FIELDS n f...` | 毫秒精度的相对过期 |
+| `HEXPIREAT k 时间戳 FIELDS n f...` | 在某个 Unix 时间戳过期 |
+| `HTTL k FIELDS n f...` | 查字段剩余秒数 |
+| `HPERSIST k FIELDS n f...` | 移除字段的过期，变回永久 |
+
+<Callout type="info">
+字段级 TTL 让 Hash 能直接当「带过期的小型会话表」用：一个 key 存某用户的所有会话，每个会话字段各自到期。
+</Callout>
+
+<Callout type="warn">
+Hash 适合「字段数适中、值不太大」的对象。如果字段数动辄上百万，或单字段值很大，应考虑拆成多个 key，避免单个大 key 拖慢集群迁移和备份。
+</Callout>
+
+---
+
+## 下一篇
+
+对象搞定了，接下来看怎么用有序的列表做队列和最新动态。
+
+继续阅读 → [List：队列、栈与最新动态](/docs/zh/newbie/lists)

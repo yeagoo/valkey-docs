@@ -1,0 +1,107 @@
+---
+title: 前沿与未来：Valkey 还在往哪走
+description: 截至 2026 年中，Valkey 正在攻关的几个主线方向。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Brain, Network, Cpu, Package } from 'lucide-react';
+
+<Callout type="info">
+本页内容截至 2026 年 6 月。Valkey 的发展节奏比较快，新版本通常 6~9 个月一版，请以 [valkey.io](https://valkey.io) 和 GitHub `unstable` 分支为准。
+</Callout>
+
+## 主线 1：AI 集成
+
+Valkey 现在最高优先级的方向。野心很大——把"缓存 + 向量库 + Agent 记忆"整合成一个进程。
+
+### 已经落地的
+
+- **valkey-search**：原生向量搜索模块（HNSW 索引，过滤查询），9.0 起 GA。
+- **语义缓存**：AWS 内部场景报告称对 LLM 调用降低成本约 86%（命中近义查询）。
+- **Mem0 / LangGraph 原生支持**：这两个 Agent 框架的 memory store 后端可以直接用 valkey。
+
+### 在路上的（截至 2026 年中）
+
+- **Hybrid search**：向量 + BM25 + filter 一次查询，目标 9.2。
+- **多模态嵌入**：支持文本 + 图像在同一索引。
+- **Agent 记忆原语**：episodic / semantic memory 的内置数据结构，提案阶段。
+
+<Cards>
+  <Card icon={<Brain />} title="为什么放在数据层做">
+    AI 应用的瓶颈正在从"模型本身"转向"数据召回 + 上下文管理"。把向量、缓存、记忆放在同一进程里，避免跨服务延迟。
+  </Card>
+</Cards>
+
+## 主线 2：网络 - RDMA 走向稳定
+
+Valkey 8.1 实验性加入 RDMA 传输，9.1 提升为生产可用（需要 RoCE 或 InfiniBand 网卡）。
+
+- 同集群内 P99 延迟从约 200μs 降到约 50μs。
+- 单节点 QPS 上限从 1.2M 提到 2.1M。
+- 主要场景：高频交易、推荐特征服务、HPC 配套。
+
+Roadmap：9.2 计划把 RDMA 推到 cluster bus，节点间同步延迟降低预期 60%+。
+
+## 主线 3：千万级连接与十亿 RPS
+
+社区目标：**单集群 1B+ RPS**。
+
+- 9.0 通过 multi-threaded I/O 重构，单节点接近 2M RPS。
+- 9.1 引入 cluster shard groups，万节点级集群协议开销降低约 30%。
+- 连接数：单节点目标 10M（io_uring + 自旋锁优化）。
+
+<Callout type="warn">
+这些都是"实验室+大客户场景"数字。绝大多数生产用例 100K~500K QPS 就够。但天花板的提升意味着架构的合理性。
+</Callout>
+
+## 主线 4：内存优化
+
+Valkey 一直在啃内存这块骨头：
+
+| 优化 | 版本 | 效果 |
+| --- | --- | --- |
+| listpack 全面替换 ziplist | 7.2 | 小集合内存约降 10% |
+| Embedded keys | 8.0 | dictEntry 嵌入式存储，每 key 省约 16 字节 |
+| Hash field expiration | 8.0 | HEXPIRE 系列指令 |
+| Object encoding 新格式 | 9.0 | string 短键省约 20% |
+| Per-key memory accounting | 9.1 | 调试用，可看到每个 key 实际占多少 |
+
+## 主线 5：模块生态
+
+官方维护的"valkey-bundle"模块：
+
+<Cards>
+  <Card icon={<Package />} title="valkey-search">向量 / 全文检索</Card>
+  <Card icon={<Package />} title="valkey-bloom">布隆 / 计数布隆过滤器</Card>
+  <Card icon={<Package />} title="valkey-json">JSON 数据类型与 JSONPath</Card>
+  <Card icon={<Package />} title="valkey-ldap">LDAP / AD 集成认证</Card>
+</Cards>
+
+模块 API 与 Redis modules 90%+ 兼容，社区维护的 RediSearch、RedisJSON 等大多可重编译运行，但出于商标和协议原因建议优先用 valkey-* 系列。
+
+## 主线 6：与 Redis 8 的竞合
+
+Redis 公司 2025 年发布 Redis 8 之后双方都在加新指令。截至 2026 年中：
+
+- **核心数据结构**几乎一致，客户端不用改代码。
+- **集群协议**仍兼容，但 Valkey 9.x 的 shard groups 在 Redis 上跑不起来。
+- **新指令**开始分叉：Valkey 的 OBJECT MEMORY、HEXPIRE 变体、CLUSTER LINKS V2 等在 Redis 缺席或语义不同。
+- **模块 ABI**：Valkey 维持向后兼容，Redis 8 modules 也基本能跑，但 Redis 公司开始往 modules 加 AGPL 约束。
+
+社区共识是：**接下来 2-3 年还能维持"基本兼容"**，再往后看具体指令使用情况。
+
+## 不太可能发生的事
+
+为了避免读者过度乐观，列几条社区里讨论过、但短期内不会发生的：
+
+- **协议改回 GPL/AGPL**：明确否决了，TSC 多次表态保留 BSD-3。
+- **加入 SQL 查询接口**：有人提过，被否。
+- **官方 Kubernetes Operator**：valkey-operator 由 percona / AWS 等社区维护，没打算"官方"。
+- **走出内存数据库范畴**：不做磁盘主存数据库，定位清晰。
+
+## 进一步阅读
+
+- [valkey.io/blog](https://valkey.io/blog) 官方博客
+- [TSC 周会纪要](https://github.com/valkey-io/valkey/tree/unstable/COMMUNITY)
+- [版本路线图](/docs/zh/versions)

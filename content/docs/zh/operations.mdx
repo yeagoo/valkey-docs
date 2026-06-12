@@ -1,0 +1,189 @@
+---
+title: 运维总览：安装、配置与持久化
+description: 从安装、valkey.conf 关键指令到淘汰策略与 RDB/AOF 持久化的运维基础。
+---
+
+本文覆盖 Valkey 单机运维的基础：如何安装、`valkey.conf` 里值得关心的指令、内存淘汰策略，以及 RDB / AOF 两套持久化机制。掌握这些之后，再去看 [复制与高可用](/docs/replication-ha)、[集群](/docs/cluster)、[安全](/docs/security) 和 [监控](/docs/observability)。
+
+## 安装
+
+Valkey 是 Redis 7.2.4 的 BSD-3 分叉，由 Linux Foundation 托管。二进制已重命名为 `valkey-server`、`valkey-cli`、`valkey-sentinel` 等；如果你的脚本仍依赖 `redis-server` / `redis-cli` 这类名字，需要额外安装兼容包（提供 `redis-*` 软链接或包装器）。
+
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+<Tabs items={['Debian/Ubuntu', 'RHEL/Fedora', 'Docker']}>
+<Tab value="Debian/Ubuntu">
+
+```bash
+# 主程序
+sudo apt update
+sudo apt install -y valkey
+# 可选：提供 redis-* 命令名的兼容层
+sudo apt install -y valkey-redis-compat
+```
+
+</Tab>
+<Tab value="RHEL/Fedora">
+
+```bash
+sudo dnf install -y valkey
+# 可选兼容层（注意 dnf 上包名与 apt 略有差异）
+sudo dnf install -y valkey-compat-redis
+```
+
+</Tab>
+<Tab value="Docker">
+
+```bash
+docker run -d --name valkey \
+  -p 6379:6379 \
+  -v valkey-data:/data \
+  valkey/valkey:latest \
+  valkey-server --appendonly yes
+```
+
+</Tab>
+</Tabs>
+
+包安装后，服务由 systemd 管理，单元名为 `valkey-server.service`，默认配置位于 `/etc/valkey/valkey.conf`，监听端口 `6379`。
+
+```bash
+sudo systemctl enable --now valkey-server
+sudo systemctl status valkey-server
+valkey-cli ping   # 期望返回 PONG
+```
+
+<Callout type="info">
+注意 `INFO` 中的 `redis_version` 字段会显示 `7.2.4`，这是为了兼容老客户端而保留的。真实版本请看 `valkey_version` 与 `server_name` 字段。
+</Callout>
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## valkey.conf 关键指令
+
+下面是日常最常调整的几项。生产环境务必先关掉 protected-mode 之外的随意绑定，并设置密码（详见 [安全](/docs/security)）。
+
+| 指令 | 说明 | 常见取值 |
+| --- | --- | --- |
+| `bind` | 监听网卡地址 | `127.0.0.1 -::1`（仅本机）或具体内网 IP |
+| `protected-mode` | 未设密码且监听非回环时拒绝外部连接 | `yes`（默认） |
+| `port` | 监听端口；设 `0` 关闭明文端口 | `6379` |
+| `dir` | 工作目录，RDB/AOF 落盘位置 | `/var/lib/valkey` |
+| `logfile` | 日志文件路径 | `/var/log/valkey/valkey.log` |
+| `requirepass` | 默认用户密码（ACL 的快捷方式） | 强随机字符串 |
+| `maxmemory` | 内存上限 | 如 `4gb` |
+| `maxmemory-policy` | 触顶后的淘汰策略 | 见下表 |
+| `appendonly` | 是否开启 AOF | `yes` 推荐 |
+| `save` | RDB 触发点 | 见持久化章节 |
+
+修改后重载：
+
+```bash
+sudo systemctl reload valkey-server
+# 或在线热改（不落盘到配置文件）
+valkey-cli CONFIG SET maxmemory 4gb
+valkey-cli CONFIG REWRITE   # 将运行时配置写回 valkey.conf
+```
+
+## 内存淘汰策略
+
+当内存达到 `maxmemory` 时，由 `maxmemory-policy` 决定行为。默认是 `noeviction`，即拒绝写入而非删数据。
+
+| 策略 | 作用范围 | 选择依据 |
+| --- | --- | --- |
+| `noeviction` | — | 不淘汰，写满后写命令返回错误（默认） |
+| `allkeys-lru` | 全部键 | 最近最少使用 |
+| `allkeys-lfu` | 全部键 | 最不经常使用（推荐做纯缓存） |
+| `allkeys-random` | 全部键 | 随机 |
+| `volatile-lru` | 仅带 TTL 的键 | 最近最少使用 |
+| `volatile-lfu` | 仅带 TTL 的键 | 最不经常使用 |
+| `volatile-random` | 仅带 TTL 的键 | 随机 |
+| `volatile-ttl` | 仅带 TTL 的键 | 优先淘汰即将过期的 |
+
+<Callout type="warn">
+所有 `volatile-*` 策略只在存在带 TTL 的键时才生效。如果没有任何可淘汰的过期键，它们会退化为 `noeviction`，从而拒绝写入。纯缓存场景建议用 `allkeys-lfu`。
+</Callout>
+
+LRU/LFU 都是近似算法，通过采样实现。采样数量由 `maxmemory-samples` 控制，默认 `5`，调大更精确但更耗 CPU。
+
+## 持久化：RDB
+
+RDB 是某一时刻的二进制快照，体积小、恢复快，适合做备份和灾备。
+
+```ini
+# 在 900 秒内有 1 次写、300 秒内 10 次、60 秒内 10000 次时触发快照
+save 900 1
+save 300 10
+save 60 10000
+dbfilename dump.rdb
+dir /var/lib/valkey
+```
+
+手动操作：
+
+```bash
+valkey-cli BGSAVE     # 后台 fork 子进程生成快照（推荐）
+valkey-cli SAVE       # 阻塞主线程直到完成（仅救急时用）
+valkey-cli LASTSAVE   # 返回上次成功落盘的时间戳
+valkey-check-rdb /var/lib/valkey/dump.rdb   # 校验 RDB 文件完整性
+```
+
+RDB 的代价是两次快照之间的数据可能丢失。要降低丢失窗口，请配合 AOF。
+
+## 持久化：AOF
+
+AOF 记录每条写命令，可回放重建数据，丢失窗口更小。
+
+```ini
+appendonly yes
+appendfsync everysec   # everysec | always | no
+auto-aof-rewrite-percentage 100
+auto-aof-rewrite-min-size 64mb
+```
+
+`appendfsync` 的取舍：
+
+| 取值 | 落盘时机 | 取舍 |
+| --- | --- | --- |
+| `always` | 每条写命令 | 最安全，最慢 |
+| `everysec` | 每秒一次 | 推荐，最多丢 1 秒 |
+| `no` | 交给操作系统 | 最快，丢失窗口不可控 |
+
+Valkey 使用 **多文件 AOF（multi-part AOF）**：数据放在 `appendonlydir/` 目录下，由一个清单文件（manifest）加一个 BASE 文件（基线快照）和若干 INCR 文件（增量命令）组成。这种结构让重写更安全、更高效。
+
+```bash
+valkey-cli BGREWRITEAOF   # 触发后台重写，压缩 AOF
+valkey-check-aof --fix /var/lib/valkey/appendonlydir/appendonly.aof.manifest
+```
+
+当 AOF 体积相对上次重写增长超过 `auto-aof-rewrite-percentage`（默认 100，即翻倍）时会自动重写。
+
+## 混合持久化
+
+开启后，AOF 重写时会先写一段 RDB 格式的基线，再追加增量命令，兼顾恢复速度与丢失窗口。默认开启：
+
+```ini
+aof-use-rdb-preamble yes
+```
+
+## 备份建议
+
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+<Steps>
+<Step>定期 `BGSAVE` 生成 RDB，并把 `dump.rdb` 拷贝到异地或对象存储。</Step>
+<Step>备份前用 `valkey-check-rdb` 校验，避免备份到损坏文件。</Step>
+<Step>多文件 AOF 需整体备份 `appendonlydir/` 目录（manifest + BASE + 所有 INCR），不能只拷其中一个文件。</Step>
+<Step>恢复时停服、替换数据文件、确保 `dir`/`dbfilename` 与配置一致后再启动。</Step>
+</Steps>
+
+<Callout type="info">
+RDB 与 AOF 同时开启时，重启会优先用 AOF 恢复（数据更完整）。生产建议两者都开：AOF 保证小丢失窗口，RDB 作为快速备份与冷启动手段。
+</Callout>
+
+## 下一步
+
+- [复制与高可用](/docs/replication-ha)：主从复制、Sentinel 与故障转移。
+- [集群](/docs/cluster)：分片与水平扩展。
+- [安全](/docs/security)：ACL、TLS 与 LDAP。
+- [监控](/docs/observability)：INFO、慢日志与 Prometheus。

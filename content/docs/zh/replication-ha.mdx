@@ -1,0 +1,142 @@
+---
+title: 复制与高可用：主从、Sentinel、双通道复制
+description: 主从复制原理、Valkey 8.0 双通道复制、Sentinel 自动故障转移与协调式 FAILOVER。
+---
+
+本文讲解 Valkey 的高可用方案：主从复制、Valkey 8.0 引入的双通道复制、Sentinel 自动故障转移，以及标准模式与集群模式下的故障转移命令。分片相关请看 [集群](/docs/cluster)，基础运维见 [运维总览](/docs/operations)。
+
+## 主从复制
+
+Valkey 采用 primary/replica（主/副本）术语。配置一个副本只需指向主节点：
+
+```ini
+replicaof 10.0.0.1 6379
+primaryauth your-strong-password   # 主节点设了密码时必填
+replica-read-only yes              # 副本只读（默认，强烈建议保留）
+```
+
+为避免主节点在副本严重落后时仍接受写入，可设置写入约束：
+
+```ini
+min-replicas-to-write 1     # 至少 1 个健康副本才允许写
+min-replicas-max-lag 10     # 副本延迟需在 10 秒以内才算健康
+```
+
+运行时可以把一个副本提升为主：
+
+```bash
+valkey-cli REPLICAOF NO ONE   # 断开复制，自身成为主
+```
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+<Callout type="warn">
+手动 `REPLICAOF NO ONE` 不会通知其他节点，容易造成脑裂。生产环境请用 Sentinel 或下文的协调式 `FAILOVER`，不要手工切换。
+</Callout>
+
+## 全量与部分重同步
+
+复制握手用 `PSYNC`。每个主节点有一个 **复制 ID（replication ID）** 和一个 **偏移量（offset）**：
+
+- **部分重同步**：副本短暂断线后带着上次的 ID + offset 重连，主节点若仍在复制积压缓冲区（backlog）中保留了对应数据，只补发缺失部分。
+- **全量重同步**：当 offset 不在 backlog、或复制 ID 不匹配时发生。主节点生成 RDB 快照传给副本，期间新写入先缓冲再补发。
+
+适当调大 `repl-backlog-size` 可让短暂网络抖动走部分重同步，避免昂贵的全量同步。
+
+## 双通道复制（Valkey 8.0）
+
+传统全量同步中，主节点要一边发 RDB、一边把同步期间的新写入缓冲在自己内存里，主节点压力大。**双通道复制（dual-channel replication）** 把 RDB 通道和主通道并行化：
+
+- RDB 通过专用连接传输；
+- 同步期间的增量命令走主通道，由 **副本端** 缓冲，而非主节点。
+
+效果是在高读负载下全量同步约快 50%，且把缓冲压力从主节点转移到副本。
+
+```ini
+# 8.0 / 8.1 默认关闭，需在主、副两端同时开启
+dual-channel-replication-enabled yes
+```
+
+<Callout type="warn">
+该选项在 8.0/8.1 默认关闭，必须在 **主节点和副本两端都开启** 才生效；预计在 9.x 成为默认。截至 2026 年中，它与 Sentinel 配合时存在若干已知交互问题，上生产前请充分压测。
+</Callout>
+
+## Valkey Sentinel
+
+Sentinel 是独立进程，负责监控主节点、在故障时自动选主并重配置副本。
+
+```bash
+valkey-sentinel /etc/valkey/sentinel.conf   # 默认端口 26379
+```
+
+`sentinel.conf` 核心配置：
+
+```ini
+sentinel monitor mymaster 10.0.0.1 6379 2
+sentinel down-after-milliseconds mymaster 5000
+sentinel failover-timeout mymaster 60000
+sentinel parallel-syncs mymaster 1
+sentinel auth-pass mymaster your-strong-password
+```
+
+| 指令 | 含义 |
+| --- | --- |
+| `monitor mymaster <ip> <port> <quorum>` | 监控名为 mymaster 的主，`quorum` 是判定主观下线达成客观下线所需的 Sentinel 票数 |
+| `down-after-milliseconds` | 多久无响应判为主观下线 |
+| `failover-timeout` | 故障转移超时时间 |
+| `parallel-syncs` | 故障转移后同时从新主重同步的副本数 |
+
+### quorum 与 majority
+
+这是两个不同的阈值，容易混淆：
+
+- **quorum**：多少个 Sentinel 认为主挂了，才标记为客观下线（ODOWN）。
+- **majority**：真正执行故障转移、授权某个 Sentinel 行动，需要多数派同意。
+
+因此 Sentinel 数量必须 `>= 3`，并部署在 **相互独立的主机** 上，否则单机故障会同时拖垮多个 Sentinel，无法形成多数派。
+
+常用命令：
+
+```bash
+valkey-cli -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME mymaster
+valkey-cli -p 26379 SENTINEL CKQUORUM mymaster   # 检查能否达成 quorum/majority
+valkey-cli -p 26379 SENTINEL FAILOVER mymaster   # 手动触发故障转移
+```
+
+## 故障转移命令
+
+### 标准模式：FAILOVER
+
+`FAILOVER` 是在主节点上发起的 **协调式、零数据丢失** 故障转移。它会先让副本追平 offset，再交接，避免数据丢失：
+
+```bash
+# 自动选一个副本接管
+valkey-cli FAILOVER
+# 指定目标副本
+valkey-cli FAILOVER TO 10.0.0.2 6379
+# 强制（目标副本未完全追平也切）
+valkey-cli FAILOVER TO 10.0.0.2 6379 FORCE
+# 中止进行中的故障转移
+valkey-cli FAILOVER ABORT
+```
+
+通过 `INFO replication` 里的 `master_failover_state` 字段跟踪状态（`no-failover` / `waiting-for-sync` / `failover-in-progress`）。
+
+### 集群模式：CLUSTER FAILOVER
+
+在集群中，应在 **副本节点** 上执行：
+
+```bash
+valkey-cli -c CLUSTER FAILOVER          # 正常切换，先与主同步
+valkey-cli -c CLUSTER FAILOVER FORCE    # 主不可达时强制切
+valkey-cli -c CLUSTER FAILOVER TAKEOVER # 跳过多数派授权，仅救灾时用
+```
+
+<Callout type="info">
+`TAKEOVER` 绕过了集群多数派握手，可能造成数据不一致或脑裂，只在确认无法联系到足够主节点的灾难场景下使用。
+</Callout>
+
+## 下一步
+
+- [集群](/docs/cluster)：分片、扩缩容与槽迁移。
+- [运维总览](/docs/operations)：安装、配置与持久化。

@@ -1,0 +1,116 @@
+---
+title: 选型与成本：托管 Valkey vs 托管 Redis
+description: 成本、许可证、性能基准与决策表，帮你在托管 Valkey 与托管 Redis 之间做出选择。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Scale, DollarSign, Gauge, GitFork } from 'lucide-react';
+
+这一页把成本、许可证、性能和厂商能力放在一起，给你一个可执行的选型框架。结论先行：**在超大规模云上做缓存，Valkey 几乎总是比 Redis OSS 更便宜，且许可证风险更低。**
+
+## 成本：Valkey 在缓存场景持续更便宜
+
+在各大超大规模云上，托管 Valkey 的报价（2026 年中口径，以官网为准）大致如下：
+
+| 厂商/服务 | 相对 Redis 的成本 |
+| --- | --- |
+| AWS ElastiCache 节点型 | 低约 20% |
+| AWS ElastiCache Serverless | 低约 33% |
+| AWS ElastiCache Serverless 最低存储 | 低约 90% |
+| AWS MemoryDB 数据写入 | 低约 80%（$0.04/GB vs $0.20/GB） |
+| GCP Memorystore | 与 Redis Cluster 持平 |
+
+<Callout type="info">
+Snap 将约 70% 集群迁移到 ElastiCache for Valkey 后，缓存支出下降约 60%（约 $2.1M/年 → 约 $840K/年），是规模化成本优势的实例。
+</Callout>
+
+## 许可证：BSD-3 vs RSAL/SSPL
+
+这是很多团队迁移的根本动机：
+
+<Cards>
+  <Card icon={<GitFork />} title="Valkey = BSD-3">
+    宽松许可证，法律风险最低，可自由商用、修改、分发，无 copyleft 义务。
+  </Card>
+  <Card icon={<Scale />} title="Redis = RSALv2 / SSPLv1">
+    源可用许可，外加可选 AGPLv3，带 copyleft 倾向，对 SaaS/嵌入分发场景有合规约束。
+  </Card>
+</Cards>
+
+如果你的法务对 copyleft 或源可用许可敏感，Valkey 的 BSD-3 是更安全的选择。
+
+## 性能基准（含注意事项）
+
+第三方基准（针对 Valkey 8.1 vs Redis OSS）显示：
+
+| 指标 | 相对 Redis OSS |
+| --- | --- |
+| 吞吐（ops/s） | 高约 8% |
+| P99 延迟 | 低约 22% |
+| 内存占用 | 低约 20% |
+
+<Callout type="warn">
+基准结果高度依赖工作负载、数据结构、并发模型和硬件，**务必用你自己的真实负载复测**。上述为第三方公布的参考值，不构成对你场景的保证。
+</Callout>
+
+## 决策表
+
+| 你的需求 | 推荐 |
+| --- | --- |
+| 最低成本 + 开源保障 | 托管 Valkey（任一厂商） |
+| 对 copyleft/源可用许可敏感 | Valkey（BSD-3） |
+| 需要持久化多可用区主库 | AWS MemoryDB for Valkey |
+| 需要最深的模块生态 / Redis Enterprise | Redis Cloud |
+| 现在就在 Azure 上 | Azure Managed Redis（无原生 Valkey） |
+| 中国区落地 | 腾讯云 / 阿里云 Tair / AWS 中国区 |
+| 超大规模分片 + 内置向量检索 | GCP Memorystore for Valkey |
+| 多云统一管理 / 免费试用 | Aiven for Valkey |
+
+## 把成本算清楚：别只看单价
+
+托管缓存的总成本不止"每小时节点费"，做对比时把这些一起算：
+
+| 成本项 | 容易被忽略的点 |
+| --- | --- |
+| 节点/实例费 | 节点型按规格×数量×时长，Serverless 按用量 |
+| 存储费 | Serverless 有最小存储门槛（Valkey 低至 100MB） |
+| 数据写入 | MemoryDB 按 $0.04/GB（超 10TB/月部分） |
+| 副本数 | 高可用要加备用节点，成本翻倍 |
+| 跨区域流量 | 跨区域复制与读流量另计 |
+| 承诺折扣 | GCP CUD 约 20%（1 年）/40%（3 年） |
+
+<Callout type="info">
+一个常见的省钱组合：先用 Serverless 观测真实峰谷，再把稳定基线切到节点型并叠加承诺折扣，把波动部分留给 Serverless 吸收。
+</Callout>
+
+## 厂商能力对比
+
+| 厂商/服务 | 计费模型 | 持久化 | 向量检索 | 中国区 |
+| --- | --- | --- | --- | --- |
+| AWS ElastiCache | Serverless + 节点型 | 否（缓存） | 视版本 | 有 |
+| AWS MemoryDB | 节点 + 数据写入 | 是（多 AZ） | 视版本 | 视区域 |
+| GCP Memorystore | 按秒，多因子 | RDB+AOF | 内置 | 无 |
+| Aiven | 套餐制 | 视套餐 | 视版本 | 无 |
+| OCI Cache | 内存+节点数 | 视配置 | ValkeySearch（V8） | 视区域 |
+| DigitalOcean | 固定套餐 | 视套餐 | 否 | 无 |
+| 腾讯云 / 阿里云 Tair | 控制台计价 | 视配置 | 视产品 | 是 |
+
+## 什么时候反而该选 Redis Cloud
+
+Redis Cloud 采用专有的 RSALv2 / SSPLv1（外加可选 AGPLv3），通常比同等缓存的托管 Valkey 更贵。它的真正价值在于**集成的模块生态与 Redis Enterprise** 能力。如果你重度依赖这些模块且不在意成本与许可证差异，Redis Cloud 仍是合理选择。
+
+<Cards>
+  <Card icon={<DollarSign />} title="想省钱" href="/docs/cloud/aws">
+    缓存优先选 AWS ElastiCache for Valkey，成本最低。
+  </Card>
+  <Card icon={<Gauge />} title="要性能 + 向量" href="/docs/cloud/gcp-memorystore">
+    GCP Memorystore 内置向量检索，分片可达 250 节点。
+  </Card>
+</Cards>
+
+## 一句话结论
+
+最低成本 + 开源保障 → **托管 Valkey**；持久多可用区主库 → **AWS MemoryDB for Valkey**；最深模块生态 → **Redis Cloud**；在 Azure 上 → **Azure Managed Redis**；中国区 → **腾讯/阿里/AWS 中国区**。
+
+回到 [云上 Valkey 概览](/docs/on-cloud)。

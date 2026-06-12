@@ -1,0 +1,81 @@
+---
+title: 分叉的故事：2024 年那 8 天
+description: Valkey 是怎么在一周多一点的时间里从 Redis 分裂出来，又是怎么走到今天的。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## 背景：一个 15 年的开源传奇要变味了
+
+Redis 自 2009 年由 antirez（Salvatore Sanfilippo）写出第一行代码起，一直是 BSD 协议下的"纯开源"项目，被几乎所有云厂商、互联网公司当作基础设施使用。它的成功也成了 Redis 公司（Redis Labs / Redis Inc.）持续焦虑的来源：云厂商靠 Redis 赚钱，Redis 公司只能靠企业版和咨询补贴。
+
+2018 年 Redis 公司就把部分模块换成了非开源协议（Commons Clause、RSAL），但核心一直没动。直到 2024 年 3 月 20 日。
+
+## 2024-03-20：协议改了
+
+Redis 公司在博客宣布：**从 Redis 7.4 起，核心协议从 BSD-3 改为 SSPL 和 RSALv2 双许可**。
+
+- SSPL 是 MongoDB 那套，被 OSI 明确判定为"不是开源协议"。
+- RSALv2 禁止把 Redis 作为托管服务对外提供。
+
+换句话说：AWS ElastiCache、Google Memorystore、阿里云 Tair 这些云托管服务的合法性，被一刀切断。社区贡献者也愣了——他们以 BSD 名义提交的代码，现在被纳入了一个不能自由再发行的协议。
+
+<Callout type="warn">
+这次改协议没有提前征求社区意见。前 Redis 维护者后来在采访中说，他们也是看博客才知道。
+</Callout>
+
+## 2024-03-21 到 03-28：8 天的窗口期
+
+接下来的一周多，是这个故事最戏剧性的部分。
+
+来自 AWS、Google、Oracle、Ericsson、Snap 等公司的几位前 Redis 核心维护者——Madelyn Olson（Amazon）、Zhao Zhao（Alibaba 时期贡献者）、Ping Xie（Google）、Viktor Söderqvist（Ericsson）等——在私聊和邮件里迅速达成共识：
+
+1. **以 Redis 7.2.4 为起点**，这是改协议前的最后一个 BSD-3 版本。
+2. **取一个全新名字**，避免商标纠纷。「Placeholderkv」是早期临时名字，最后定为 **Valkey**（"valuable key"）。
+3. **托管给一个中立基金会**，避免重蹈"被一家公司控制"的覆辙。
+
+3 月 28 日，Linux 基金会正式宣布接管 Valkey 项目。从协议变更到分叉宣布，**整整 8 天**。
+
+## 2024 年下半年：阵营成形
+
+宣布后的几个月，Valkey 收到了行业级的集体支持：
+
+| 时间 | 事件 |
+| --- | --- |
+| 2024-04 | Valkey 7.2 发布，与 Redis 7.2.4 二进制兼容 |
+| 2024-04 | AWS、Google Cloud、Oracle、Ericsson、Snap 成为创始白金赞助 |
+| 2024-05 | 阿里云、腾讯云、华为云贡献者加入 |
+| 2024-06 | Aiven 宣布全平台从 Redis 迁移到 Valkey |
+| 2024-09 | Valkey 8.0 发布，首个"自己加新功能"的大版本，QPS 约提升 2 倍 |
+
+到 2024 年底，已经有几十家公司在生产环境跑 Valkey，Aiven 一家就迁移了约 15000 台服务器。
+
+## 2025-05：Redis 公司反扑
+
+Redis 公司大概也意识到 SSPL 杀伤力太大。2025 年 5 月，他们发布 Redis 8，**把 AGPLv3 加回作为可选协议之一**（仍然保留 RSAL/SSPL）。同时重新雇佣了 antirez 担任 Redis 开发者倡导者。
+
+但这一步对 Valkey 阵营来说已经太晚：
+
+- Aiven 已经全量迁完。
+- AWS ElastiCache、MemoryDB 已经默认推 Valkey 引擎。
+- Google Memorystore 在 7.x 之后只升级 Valkey 版本。
+- Linux 发行版（Fedora、Debian、Ubuntu）已经把 redis-server 替换为 valkey-server。
+
+## 现在：双开源格局
+
+截至 2026 年 6 月：
+
+- **Valkey**：BSD-3 协议、Linux 基金会托管、TSC 由多家公司组成、最新版 9.1（2026-05 发布）。
+- **Redis**：AGPLv3/RSAL/SSPL 三选一、Redis 公司控制、有 antirez 站台、最新版 Redis 8.x。
+
+两者协议层基本兼容，客户端通常无需改代码即可切换。但底层（RDB 格式、集群协议、新指令）已经开始出现"友好的不兼容"。
+
+## 给读者的几条经验
+
+<Callout type="info">
+- **协议比代码值钱**：选基础设施时把许可证读一遍，比 benchmark 重要。
+- **基金会托管不是万能，但是个最低限度的保险**：单一公司控制的项目，迟早要面对盈利压力。
+- **快速行动有时是唯一的答案**：8 天分叉、几家公司联合，这是 Linux 基金会近十年最快的项目接管之一。
+</Callout>
+
+要继续读：[社区治理](/docs/zh/story/governance) · [前沿方向](/docs/zh/story/frontier) · [版本时间线](/docs/zh/versions)。

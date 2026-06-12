@@ -1,0 +1,159 @@
+---
+title: 监控与可观测性：INFO、慢日志与 Prometheus
+description: 用 INFO、SLOWLOG/COMMANDLOG、LATENCY 与 MEMORY 诊断，并接入 Prometheus + Grafana。
+---
+
+监控 Valkey 的第一步是用好内置诊断命令，第二步是把指标接入 Prometheus + Grafana 持续观测。本文覆盖两者。基础运维见 [运维总览](/docs/operations)。
+
+## INFO：全局健康快照
+
+`INFO` 是最常用的体检命令，按分区返回大量指标：
+
+```bash
+valkey-cli INFO            # 全部
+valkey-cli INFO memory     # 只看内存分区
+valkey-cli INFO replication
+```
+
+主要分区：
+
+| 分区 | 关注点 |
+| --- | --- |
+| `server` | 版本（看 `valkey_version`/`server_name`，而非兼容用的 `redis_version`）、运行时长 |
+| `clients` | 连接数、阻塞客户端 |
+| `memory` | `used_memory`、`maxmemory`、碎片率 |
+| `persistence` | RDB/AOF 状态、上次落盘 |
+| `stats` | 命中率、ops/s、过期与淘汰计数 |
+| `replication` | 主从角色、offset、`master_failover_state` |
+| `cpu` | CPU 占用 |
+| `commandstats` | 每条命令的调用次数与耗时 |
+| `latencystats` | 每命令延迟分位 |
+| `errorstats` | 各类错误计数 |
+| `cluster` | 集群是否启用 |
+| `keyspace` | 各 DB 的键数量与过期键数 |
+
+## valkey-cli 诊断模式
+
+`valkey-cli` 自带多种一次性诊断模式，无需额外工具：
+
+```bash
+valkey-cli --stat            # 每秒滚动输出 ops/连接/内存等概览
+valkey-cli --bigkeys         # 采样找出各类型中最大的键
+valkey-cli --memkeys         # 按内存占用找大键
+valkey-cli --latency         # 持续测量到服务端的延迟
+valkey-cli --latency-history # 分段历史延迟
+valkey-cli --hotkeys         # 找热点键（需 LFU 淘汰策略）
+```
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+<Callout type="info">
+`--hotkeys` 依赖 LFU 计数器，需先把 `maxmemory-policy` 设为 `allkeys-lfu` 或 `volatile-lfu`，否则无法统计访问频率。
+</Callout>
+
+## 慢查询：SLOWLOG 与 COMMANDLOG
+
+`SLOWLOG` 记录执行耗时超阈值的命令。阈值单位是 **微秒**：
+
+```ini
+slowlog-log-slower-than 10000   # 超过 10ms（10000µs）记录
+slowlog-max-len 128             # 最多保留 128 条
+```
+
+```bash
+valkey-cli SLOWLOG GET 10   # 取最近 10 条
+valkey-cli SLOWLOG LEN
+valkey-cli SLOWLOG RESET
+```
+
+Valkey 进一步提供 **COMMANDLOG**，是 SLOWLOG 的超集：除了慢命令，还能按 **请求体大小** 和 **回复体大小** 记录，便于排查大 key 和大响应：
+
+```ini
+commandlog-request-larger-than 1048576   # 请求 > 1MB 记录
+commandlog-reply-larger-than  1048576    # 回复 > 1MB 记录
+```
+
+## 延迟监控：LATENCY
+
+延迟监控按事件维度采样，阈值由 `latency-monitor-threshold`（毫秒）控制，设为 0 关闭：
+
+```ini
+latency-monitor-threshold 100   # 记录耗时 >= 100ms 的事件
+```
+
+```bash
+valkey-cli LATENCY LATEST       # 各事件的最新峰值
+valkey-cli LATENCY HISTORY <event>
+valkey-cli LATENCY RESET
+valkey-cli LATENCY DOCTOR       # 人类可读的诊断建议
+valkey-cli LATENCY GRAPH <event>
+valkey-cli LATENCY HISTOGRAM    # 命令延迟直方图
+```
+
+`LATENCY DOCTOR` 会结合采样给出排查方向，是定位偶发卡顿的好起点。
+
+## 内存诊断：MEMORY
+
+```bash
+valkey-cli MEMORY USAGE mykey   # 单个键占用字节数
+valkey-cli MEMORY STATS         # 内存细分统计
+valkey-cli MEMORY DOCTOR        # 内存健康诊断与建议
+```
+
+## MONITOR：仅限调试
+
+`MONITOR` 实时打印服务端处理的每一条命令：
+
+```bash
+valkey-cli MONITOR
+```
+
+<Callout type="warn">
+`MONITOR` 会显著拖慢服务端吞吐（每条命令都要复制并推送给监听者），**严禁在生产持续运行**，只用于短时调试。
+</Callout>
+
+## Prometheus 接入
+
+import { Callout as Note } from 'fumadocs-ui/components/callout';
+
+<Note type="warn">
+截至 2026 年中，**没有官方的 valkey-exporter**。社区事实标准是 `oliver006/redis_exporter`，它支持 Valkey 7/8/9。
+</Note>
+
+`redis_exporter` 默认监听端口 `9121`，指标前缀为 `redis_*`（沿用 Redis 命名）：
+
+```bash
+redis_exporter \
+  -redis.addr=redis://10.0.0.1:6379 \
+  -redis.password=your-pw \
+  -web.listen-address=:9121
+```
+
+Prometheus 抓取配置：
+
+```text
+scrape_configs:
+  - job_name: valkey
+    static_configs:
+      - targets: ['10.0.0.1:9121']
+```
+
+可视化：
+
+| 工具 | 说明 |
+| --- | --- |
+| Grafana 官方仪表盘 | 导入 Dashboard ID `763`（Redis 通用面板，适配 Valkey） |
+| Percona PMM | 自带 Valkey/Redis 仪表盘，开箱即用 |
+
+## 9.1 的可观测性增强
+
+- 新增 **主线程 / IO 线程** 维度的指标，便于判断瓶颈在主线程还是 IO 线程。
+- 支持结构化日志：`log-format json`，方便日志采集与检索。
+
+```ini
+log-format json
+```
+
+## 下一步
+
+- [运维总览](/docs/operations)：安装、配置与持久化。

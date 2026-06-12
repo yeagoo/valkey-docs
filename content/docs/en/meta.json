@@ -1,0 +1,17 @@
+{
+  "title": "Valkey Docs",
+  "pages": [
+    "index",
+    "---Get Started---",
+    "quickstart",
+    "for-beginners",
+    "---Scenarios---",
+    "for-ai-devs",
+    "on-cloud",
+    "---Versions---",
+    "versions",
+    "---Operations---",
+    "operations",
+    "reference"
+  ]
+}

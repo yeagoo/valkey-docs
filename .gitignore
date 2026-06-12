@@ -1,0 +1,15 @@
+node_modules
+.next
+.source
+out
+.vercel
+.env*.local
+*.log
+.DS_Store
+tsconfig.tsbuildinfo
+.claude/settings.local.json
+
+# Cloudflare / OpenNext
+.open-next
+.wrangler
+cloudflare-env.d.ts

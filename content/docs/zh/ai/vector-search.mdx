@@ -1,0 +1,179 @@
+---
+title: valkey-search：向量检索实战
+description: 用官方 valkey-search 模块在 Valkey 中构建毫秒级向量相似度检索与二级索引。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+`valkey-search`（VSS）是 Valkey 官方的 BSD-3 C++ 模块，提供向量相似度检索与二级索引能力。它把数据索引在 Valkey 的 Hash 或 JSON 键上，用 RediSearch 风格的 `FT.*` 命令查询——命令名直接沿用 `FT.CREATE` / `FT.SEARCH`，不是自定义命名。
+
+核心特性：多线程、无锁读、SIMD 加速，性能随核数近似线性扩展；HNSW 索引的查询复杂度为 O(log N)。它是 RediSearch 的一个子集，从 v1.2.0（2026 年 3 月）起才支持 TEXT 全文检索。
+
+## 版本要求
+
+| valkey-search 版本 | 发布时间 | 关键能力 | 最低 Valkey |
+| --- | --- | --- | --- |
+| 1.0.0 GA | 2025-05-28 | 向量检索 + 二级索引 | 8.1.1+ |
+| 1.1.0 | 2025-12 | `FT.AGGREGATE` | 8.1.1+ |
+| 1.2.0 | 2026-03-17 | 全文 TEXT + 聚合 | 9.0.1+ |
+
+<Callout type="warn">
+很多第三方集成会自动创建 TEXT 字段，这在低于 1.2.0 的 valkey-search 上会失败。要么升级到 1.2.0+，要么改用 TAG 字段。详见[框架集成](/docs/ai/framework-integrations)。
+</Callout>
+
+## 加载模块
+
+```bash
+valkey-server --loadmodule /path/to/libsearch.so
+```
+
+也可以写进配置文件 `valkey.conf`：
+
+```text
+loadmodule /path/to/libsearch.so
+```
+
+如果你用的是托管服务（AWS ElastiCache for Valkey 或 GCP Memorystore for Valkey），检索能力已内置，无需手动加载模块。
+
+## 创建索引：FT.CREATE
+
+向量字段只支持 `TYPE FLOAT32`，`DIM`（维度）必填。索引类型有两种：
+
+- **FLAT**：精确暴力检索，召回 100%，适合小数据集或离线评测。
+- **HNSW**：近似检索，O(log N)，适合生产规模。
+
+距离度量 `DISTANCE_METRIC` 支持 `L2`、`IP`（内积）、`COSINE`。
+
+```text
+FT.CREATE myIndex SCHEMA embedding VECTOR HNSW 6 TYPE FLOAT32 DIM 3 DISTANCE_METRIC COSINE
+```
+
+`HNSW` 后面的 `6` 表示后续 key-value 参数的个数（这里是 `TYPE FLOAT32`、`DIM 3`、`DISTANCE_METRIC COSINE` 三对）。HNSW 可调参数：
+
+| 参数 | 默认 | 上限 | 说明 |
+| --- | --- | --- | --- |
+| `M` | 16 | 512 | 每个节点的最大出边数，越大召回越高、内存越多 |
+| `EF_CONSTRUCTION` | 200 | — | 构图时的候选队列宽度，影响建索引质量 |
+| `EF_RUNTIME` | 10 | — | 查询时的候选队列宽度，越大越准越慢 |
+
+带完整参数的 HNSW 示例：
+
+```text
+FT.CREATE docIndex
+  SCHEMA embedding VECTOR HNSW 10
+    TYPE FLOAT32 DIM 1536 DISTANCE_METRIC COSINE M 32 EF_CONSTRUCTION 200
+```
+
+## 向量编码：float32 小端字节流
+
+Hash 字段里存的是原始 float32 小端字节流，长度为 `DIM * 4` 字节。Python 用 NumPy 生成：
+
+```python
+import numpy as np
+
+def encode(vec: list[float]) -> bytes:
+    return np.array(vec, dtype=np.float32).tobytes()
+
+blob = encode([0.1, 0.2, 0.3])  # DIM=3 → 12 字节
+```
+
+写入数据：
+
+```python
+import valkey  # 或 redis-py，wire 兼容
+
+r = valkey.Valkey(host="localhost", port=6379)
+r.hset("doc:1", mapping={"embedding": encode([0.1, 0.2, 0.3])})
+```
+
+## KNN 查询：FT.SEARCH + DIALECT 2
+
+valkey-search 只支持 `DIALECT 2`。查询向量通过 `PARAMS` 以字节流传入：
+
+```text
+FT.SEARCH myIndex "*=>[KNN 5 @embedding $q]" PARAMS 2 q "<blob>" DIALECT 2
+```
+
+Python 完整示例：
+
+```python
+q = encode([0.1, 0.2, 0.31])
+res = r.execute_command(
+    "FT.SEARCH", "myIndex",
+    "*=>[KNN 5 @embedding $q]",
+    "PARAMS", "2", "q", q,
+    "DIALECT", "2",
+)
+```
+
+相似度分数会自动命名为 `__embedding_score`，可用 `AS` 重命名：
+
+```text
+FT.SEARCH myIndex "*=>[KNN 5 @embedding $q AS score]" PARAMS 2 q "<blob>" DIALECT 2
+```
+
+## 混合检索：先过滤再 KNN
+
+把标量过滤条件放在 `=>[KNN ...]` 前面，会先做预过滤再在子集上跑向量检索：
+
+```text
+FT.SEARCH myIndex "@category:{electronics}=>[KNN 5 @embedding $q]" PARAMS 2 q "<blob>" DIALECT 2
+```
+
+过滤语法：
+
+| 类型 | 写法 | 含义 |
+| --- | --- | --- |
+| TAG | `@f:{a\|b}` | 标签字段，匹配 a 或 b |
+| 数值范围 | `@f:[min max]` | 数值字段区间 |
+| AND | `@a:{x} @b:{y}` | 空格表示与 |
+| OR | `@f:{a\|b}` | 竖线表示或 |
+| NOT | `-@f:{x}` | 减号表示非 |
+
+例如「电子类且价格在 100 到 500 之间」：
+
+```text
+@category:{electronics} @price:[100 500]=>[KNN 5 @embedding $q]
+```
+
+## JSON 索引的坑
+
+可以索引 JSON 键，用 `ON JSON` 配合 JSONPath 别名：
+
+```text
+FT.CREATE jsonIndex ON JSON
+  SCHEMA $.embedding AS embedding VECTOR FLAT 6 TYPE FLOAT32 DIM 3 DISTANCE_METRIC COSINE
+```
+
+<Callout type="warn">
+JSON 里的向量必须是「带方括号的 JSON 字符串」，不能是原生 JSON 数组。也就是 `"[0.1,0.2,0.3]"` 而不是 `[0.1,0.2,0.3]`。
+</Callout>
+
+```python
+import json
+r.execute_command("JSON.SET", "doc:1", "$",
+    json.dumps({"embedding": "[0.1,0.2,0.3]", "category": "electronics"}))
+```
+
+## 性能基准（AWS ElastiCache，2025 年 10 月）
+
+| 数据集 | 规模 / 维度 | P50 延迟 | 吞吐 | 召回 |
+| --- | --- | --- | --- | --- |
+| SIFT | 1M / 128d | 0.8ms | 26,451 qps | 95% |
+| Cohere | 10M / 768d | 3.5ms | 18,723 qps | — |
+| OpenAI | 5M / 1536d | 3.9ms | — | — |
+
+即便在 5M 条 1536 维向量上，单次检索仍维持在个位数毫秒。
+
+## 集群扩展
+
+valkey-search 多线程、无锁读，性能随 CPU 核数近似线性扩展；HNSW 的 O(log N) 让单节点可承载百万到上亿级向量，配合 Valkey Cluster 可继续横向扩展。
+
+## 下一步
+
+<Steps>
+<Step>用本文搭好向量索引，作为检索底座。</Step>
+<Step>把它接进 [RAG 架构](/docs/ai/rag)，存 embedding + chunk 文本 + 元数据。</Step>
+<Step>叠加[语义缓存](/docs/ai/semantic-cache)，省下重复 LLM 调用。</Step>
+</Steps>

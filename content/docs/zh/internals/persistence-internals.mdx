@@ -1,0 +1,176 @@
+---
+title: 持久化内部：RDB、AOF 与混合
+description: fork+COW 快照、多文件 AOF、fsync 策略、混合前导与启动加载顺序。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Save, FileStack, Layers, AlertCircle } from 'lucide-react';
+
+Valkey 提供两套互补的持久化机制——RDB 快照与 AOF 追加日志，外加 7.x 引入的 **多文件 AOF + 混合前导** 让两者优势叠加。理解它们的内部细节，是你在丢数据风险、启动时长、磁盘成本之间做权衡的前提。本文按机制拆开讲，给出可直接套用的配置组合。
+
+## RDB：fork + COW 快照
+
+RDB 是一次 **点对点** 的二进制快照，文件名 `dump.rdb`。生成路径：
+
+<Steps>
+<Step>
+主进程收到 `SAVE`（阻塞）或 `BGSAVE`（默认）请求，或者按 `save` 规则自动触发。
+</Step>
+<Step>
+调用 `fork()`。Linux 用写时复制（Copy-On-Write），父子进程共享物理内存页，子进程立刻持有一个一致快照。
+</Step>
+<Step>
+子进程把内存中的键空间按对象类型编码写入新 RDB 文件（先写到 `temp-<pid>.rdb`，最后 `rename`）。
+</Step>
+<Step>
+父进程继续处理写命令；被修改的内存页才会真正复制一份，所以 RSS 在 BGSAVE 期间可能上涨——最坏情况翻倍，需要预留余量。
+</Step>
+</Steps>
+
+```ini
+save 3600 1       # 1 小时内 1 次写
+save 300 100      # 5 分钟内 100 次写
+save 60 10000     # 1 分钟内 1 万次写
+rdb-save-incremental-fsync yes
+rdbcompression yes
+rdbchecksum yes
+dbfilename dump.rdb
+dir /var/lib/valkey
+```
+
+| 优点 | 缺点 |
+| --- | --- |
+| 文件紧凑，备份/远端复制方便 | 两次快照之间的数据可能丢失 |
+| 启动加载快（顺序读+解码） | fork 在大内存实例上有抖动 |
+| 对父进程影响小 | COW 期间 RSS 可能短时翻倍 |
+
+<Callout type="warn" title="大实例 fork 的代价">
+Linux 上 fork 一个 64 GB 的进程需要复制页表（约 128 MB），单次可能阻塞主线程 100–500 ms。如果你看到 `latest_fork_usec` 持续偏高，考虑分片或者降低 `maxmemory`。
+</Callout>
+
+## AOF：追加写日志
+
+AOF 把每条写命令以 RESP 文本形式追加到日志，重启时回放还原数据。Valkey 7.x 起，AOF **不再是单个 `appendonly.aof` 文件**，而是 `appendonlydir/` 目录下的多文件结构：
+
+```text
+appendonlydir/
+├── appendonly.aof.manifest    # 描述谁是 BASE、谁是当前 INCR
+├── appendonly.aof.1.base.rdb  # 基线（混合模式下是 RDB 格式）
+└── appendonly.aof.1.incr.aof  # 增量命令
+```
+
+BGREWRITEAOF 触发时，新生成一个 BASE + 新的 INCR，老 BASE/INCR 在 manifest 切换后被异步清理。这样设计避免了重写过程中"主 AOF 文件被替换"导致的不一致风险，也让备份工具能安全 hard-link 旧文件。
+
+### fsync 策略
+
+```ini
+appendonly yes
+appendfsync everysec    # 推荐
+```
+
+| 策略 | 行为 | 最坏丢失 | 性能 |
+| --- | --- | --- | --- |
+| `always` | 每条写命令同步 | 0 | 最差，受磁盘延迟 |
+| `everysec` | 后台线程每秒同步 | 1 秒 | 良好 |
+| `no` | 由内核决定（通常 30 秒） | 30 秒 | 最佳 |
+
+`everysec` 是绝大多数场景的最优解。`always` 在 NVMe 上也能跑出可观吞吐，但 p99 抖动比 `everysec` 高一个数量级。`no` 仅适合纯缓存场景。
+
+### 自动重写
+
+```ini
+auto-aof-rewrite-percentage 100   # 比上次重写后增长 100% 触发
+auto-aof-rewrite-min-size 64mb
+```
+
+`100% / 64MB` 是默认，缓存型业务可以调大到 `200% / 256mb` 减少重写频率。重写期间产生的命令会写入内存重写缓冲，重写完成后再 append 到新 INCR，磁盘 IO 短期可能翻倍。
+
+## 混合持久化（hybrid）
+
+```ini
+aof-use-rdb-preamble yes   # 默认 yes
+```
+
+开启后，BGREWRITEAOF 生成的 BASE 文件用 **RDB 二进制格式** 写入，后续 INCR 仍是 RESP 文本命令。启动加载时：
+
+1. 先以极快的 RDB 解码恢复 BASE。
+2. 再回放 INCR 中的增量命令到当前。
+
+这把"AOF 启动慢"的痛点解决了——一个 32 GB 库通常能在 30 秒内载入。
+
+<Callout title="启动加载优先级">
+启动时 Valkey 优先选择 AOF（如果 `appendonly yes` 且 `appendonlydir/` 非空）。RDB 仅在没有 AOF 或 AOF 损坏时使用。这也是为什么从 Redis 搬迁文件后，首次启动建议 `appendonly no`：避免空 AOF 屏蔽掉 RDB，详见 [从 Redis 迁移到 Valkey](/docs/migration/from-redis)。
+</Callout>
+
+## 推荐配置组合
+
+<Tabs items={['通用生产', '纯缓存', '低丢失要求']}>
+<Tab value="通用生产">
+
+```ini
+save 3600 1
+save 300 100
+save 60 10000
+
+appendonly yes
+appendfsync everysec
+aof-use-rdb-preamble yes
+auto-aof-rewrite-percentage 100
+auto-aof-rewrite-min-size 64mb
+```
+
+RDB + AOF 双开，启动快，最坏丢 1 秒。
+
+</Tab>
+<Tab value="纯缓存">
+
+```ini
+save ""             # 关闭 RDB
+appendonly no
+```
+
+数据可重建，省 IO 与磁盘空间。配合副本即可。
+
+</Tab>
+<Tab value="低丢失要求">
+
+```ini
+appendonly yes
+appendfsync always
+aof-use-rdb-preamble yes
+no-appendfsync-on-rewrite no
+```
+
+`always` 把丢失降到单命令粒度，性能换强度。建议 NVMe + 独立磁盘。
+
+</Tab>
+</Tabs>
+
+## RDB 格式版本边界
+
+| 来源 | RDB 版本 | Valkey 9.x 能否加载 |
+| --- | --- | --- |
+| Redis 6.x / 7.0 / 7.2 | 10 | 可以 |
+| Valkey 7.2 / 8.x / 9.x | 11+ | 可以 |
+| Redis 7.4 / Redis 8 | 12 | **不能**，格式分叉 |
+
+这条边界决定了你从 Redis 迁过来时能否走文件搬迁——详见 [从 Redis 迁移到 Valkey](/docs/migration/from-redis)。
+
+## 常见故障定位
+
+- **启动报 `Bad file format reading the append only file`**：通常是上一次崩溃时 INCR 写到一半。用 `valkey-check-aof --fix appendonlydir/` 截断后启动。
+- **`latest_fork_usec` 持续超过 200ms**：实例内存过大，考虑分片或 `madvise` 调优。
+- **磁盘满**：AOF 重写需要双倍空间，监控 `aof_current_size` + 预留 2x。
+- **BGSAVE 失败 `Can't save in background`**：通常是 fork 失败（OOM 或权限），看 systemd 日志。
+- **副本反复全量同步**：repl-backlog 太小，调大 `repl-backlog-size` 到 256MB+。
+
+## 备份策略建议
+
+1. RDB 每日异步上传到对象存储（S3/OSS/R2）。
+2. AOF 实时双向复制到另一可用区（通过 Valkey 副本即可，无需第三方）。
+3. 季度恢复演练：在隔离环境拉取 RDB 验证可加载、数据完整。
+
+回到 [运维总览](/docs/operations) 配置监控；或继续看 [内存模型](/docs/internals/memory) 理解 COW 期间 RSS 飙升的根因。

@@ -1,0 +1,139 @@
+---
+title: 过期与淘汰：TTL 与 maxmemory
+description: 5 分钟读懂 Key 过期机制、主动 vs 惰性过期，以及 maxmemory 与 8 种淘汰策略的选择。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Code } from 'lucide-react';
+
+Valkey 的内存控制有两层：**TTL**（单 Key 过期）和 **maxmemory + 淘汰策略**（达到上限时整体回收）。
+两者配合，才能让缓存既新鲜又稳定不挂。
+
+## TTL：单 Key 过期
+
+| 命令 | 作用 |
+| --- | --- |
+| `EXPIRE key seconds` | 设置秒级 TTL |
+| `PEXPIRE key milliseconds` | 毫秒级 TTL |
+| `EXPIREAT key unix-seconds` | 指定到期时间戳 |
+| `PEXPIREAT key unix-ms` | 毫秒时间戳 |
+| `TTL / PTTL key` | 查剩余秒 / 毫秒 |
+| `EXPIRETIME / PEXPIRETIME key` | 查绝对到期时间戳 |
+| `PERSIST key` | 移除 TTL，变成永久 |
+
+```text
+127.0.0.1:6379> SET token:abc xxx
+OK
+127.0.0.1:6379> EXPIRE token:abc 600
+(integer) 1
+127.0.0.1:6379> TTL token:abc
+(integer) 600
+127.0.0.1:6379> PERSIST token:abc
+(integer) 1
+127.0.0.1:6379> TTL token:abc
+(integer) -1
+```
+
+`TTL` 返回 `-1` 表示永久，`-2` 表示 Key 不存在。
+
+### SET 一次搞定 TTL
+
+```text
+127.0.0.1:6379> SET page:home "<html>..." EX 60
+127.0.0.1:6379> SET page:home "<html>..." PX 60000
+127.0.0.1:6379> SET page:home "<html>..." EXAT 1718260800
+127.0.0.1:6379> SET page:home "<html>..." EX 60 KEEPTTL
+```
+
+<Callout type="info">
+`KEEPTTL` 是覆盖写入但**保留原 TTL**，很适合「刷新内容但不重置剩余过期时间」的场景。
+</Callout>
+
+Hash 字段级 TTL 见 [Hash](/docs/zh/newbie/hashes)。
+
+## 主动 vs 惰性过期
+
+Valkey 用两种方式回收过期 Key：
+
+- **惰性（lazy）**：访问到一个过期 Key 时，立即删除并按未命中返回。
+- **主动（active）**：后台周期性地随机抽样 20 个带 TTL 的 Key，删除其中已过期的；
+  如果过期比例超 25% 就立刻再抽一轮，否则等到下次循环。
+
+这种「抽样 + 比例」策略避免一次扫描全库阻塞主线程。
+副作用是**冷数据可能在过期后还活着一段时间**，只占内存不返回——这正是 `maxmemory` 兜底的位置。
+
+## maxmemory：内存上限
+
+```text
+127.0.0.1:6379> CONFIG SET maxmemory 1gb
+OK
+127.0.0.1:6379> CONFIG GET maxmemory-policy
+1) "maxmemory-policy"
+2) "noeviction"
+```
+
+写入即将超限时，Valkey 根据 `maxmemory-policy` 决定怎么办。
+
+## 8 种淘汰策略
+
+| 策略 | 范围 | 选择依据 |
+| --- | --- | --- |
+| `noeviction`（默认） | — | 不淘汰，写命令直接报错 OOM |
+| `allkeys-lru` | 所有 Key | 最近最少使用 |
+| `allkeys-lfu` | 所有 Key | 最不常使用（按访问频率） |
+| `allkeys-random` | 所有 Key | 随机淘汰 |
+| `volatile-lru` | 仅带 TTL 的 Key | 最近最少使用 |
+| `volatile-lfu` | 仅带 TTL 的 Key | 最不常使用 |
+| `volatile-random` | 仅带 TTL 的 Key | 随机淘汰 |
+| `volatile-ttl` | 仅带 TTL 的 Key | 优先淘汰剩余 TTL 短的 |
+
+<Callout type="warn">
+**默认 `noeviction` 意味着内存满了写入会失败**。生产做纯缓存的实例几乎都应改成 `allkeys-lru` 或 `allkeys-lfu`。
+</Callout>
+
+`volatile-*` 系列只在带 TTL 的 Key 中挑；如果没 Key 带 TTL，行为就退化成 `noeviction`，写入照样报错。
+
+## 抽样精度：maxmemory-samples
+
+Valkey 的 LRU / LFU 不是严格遍历全表，而是**抽样近似**。默认每轮抽 5 个 Key 选最差的踢。
+
+```text
+127.0.0.1:6379> CONFIG GET maxmemory-samples
+1) "maxmemory-samples"
+2) "5"
+127.0.0.1:6379> CONFIG SET maxmemory-samples 10
+OK
+```
+
+`10` 已经非常接近真实 LRU 但 CPU 多一点，对大多数业务 `5` 就够。LFU 推荐 `10`。
+
+## 选哪种策略？决策树
+
+- 纯缓存，访问越频繁越要留 → **`allkeys-lfu`**
+- 纯缓存，按「最近用过」即可 → **`allkeys-lru`**
+- 混合用：有持久数据 + 有 TTL 缓存，不希望持久数据被踢 → **`volatile-lru`** 或 **`volatile-lfu`**
+- 不想 Valkey 自动删任何东西，宁可写失败 → **`noeviction`**（默认）
+
+## 监控 OOM 与淘汰
+
+| 指标（`INFO memory` / `INFO stats`） | 含义 |
+| --- | --- |
+| `used_memory_human` | 当前占用 |
+| `maxmemory_human` | 上限 |
+| `evicted_keys` | 已被淘汰的总数 |
+| `expired_keys` | 因 TTL 被删的总数 |
+| `mem_fragmentation_ratio` | 碎片率，长期 > 1.5 考虑重启或 activedefrag |
+
+`evicted_keys` 持续上涨说明上限太小或热点过多，要扩容或调策略。
+
+## 下一篇
+
+<Cards>
+  <Card
+    icon={<Code />}
+    href="/docs/zh/newbie/scripting-and-functions"
+    title="脚本与函数：Lua、EVAL 与 FUNCTION"
+    description="用 Lua 写原子操作，了解 Valkey Functions 的持久化与复制。"
+  />
+</Cards>

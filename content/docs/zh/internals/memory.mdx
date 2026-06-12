@@ -1,0 +1,167 @@
+---
+title: 内存模型与优化
+description: 每槽字典、嵌入式键、8.1/9.1 内存压缩与 maxmemory 驱逐策略。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Database, MemoryStick, Trash2, BarChart3 } from 'lucide-react';
+
+内存是 Valkey 上最贵的资源，也是最容易被忽视的优化方向。Valkey 8.0 起对内存模型做了一系列硬核改进——按槽字典、嵌入式键、新哈希表实现——把同样的数据塞进更小的 RSS 里。本文沿着分配链路从下到上讲清楚，并给出实操层面的调参与排查命令。
+
+## 分配器：jemalloc
+
+Valkey 默认链入 jemalloc 5.x（编译时通过 `MALLOC=jemalloc` 控制）。原因有三：
+
+- 多线程下竞争比 glibc malloc 低。
+- 内部 size class 与 Valkey 对象大小高度吻合，外部碎片小。
+- 提供 `MALLOC_STATS_PRINT` 友好的统计接口，便于排查。
+
+观测：
+
+```bash
+valkey-cli INFO memory | grep -E 'used_memory|mem_allocator|mem_fragmentation_ratio'
+valkey-cli MEMORY STATS
+```
+
+`mem_fragmentation_ratio` 是 RSS / used_memory：
+
+| 区间 | 解读 |
+| --- | --- |
+| 低于 1.0 | 发生了 swap，立刻处理 |
+| 1.0 – 1.5 | 正常 |
+| 1.5 – 2.0 | 有改善空间，可开 `activedefrag yes` |
+| 高于 2.0 | 严重碎片，考虑滚动重启或主动整理 |
+
+## 8.0：按槽字典（per-slot dictionaries）
+
+历史上 Redis 的键空间是 **一个** 全局哈希表，集群模式下也是。这带来两个问题：
+
+1. 全局 rehash 影响整库延迟。
+2. 每个键需要在 dictEntry 里携带额外指针，开销大。
+
+Valkey 8.0 在集群模式下把单个全局字典拆成 **16384 个按槽字典**（与 hash slot 一一对应）。收益：
+
+- 每个键平均节省约 **24 字节**——dictEntry 内的指针被压缩、按槽字典更紧凑。
+- rehash 局部化：某个槽数据量暴涨触发 rehash 时，只影响该槽相关请求。
+- 集群迁移（[原子槽迁移](/docs/internals/cluster-internals)）天然按槽切分，9.0 的原子迁移正是建立在这之上。
+
+官方基准：650 万键的 cluster 实例，内存从 **693.64 MB 降到 550.56 MB，节省约 20.6%**。
+
+## 8.0：嵌入式键（embedded keys）
+
+短键（低于 44 字节）以前要单独分配一块 SDS 缓冲并由 dictEntry 指向。8.0 把短键直接 **嵌入** 到 dictEntry/robj 内部，减少一次分配与一个指针。实测对中小键密集型业务（典型缓存场景）节省 **9%–10%** 内存。
+
+## 8.1：新哈希表实现
+
+8.1 引入了重写过的哈希表结构（更紧凑的 bucket 布局、更友好的 cache line 对齐、SIMD 比较）。实测：
+
+- 内存再下降 **最高 20%**。
+- 吞吐 **提升约 10%**。
+
+这两个优化叠加在 8.0 的按槽字典之上，相对 Redis 7.2 的总收益常常在 30%+。
+
+## 9.1：字符串与有序集合优化
+
+9.1（2026 年 5 月）继续针对常见数据类型瘦身：
+
+| 数据类型 | 节省幅度 | 触发条件 |
+| --- | --- | --- |
+| 短于 128 字节的 String | 最高 20% | 默认开启，无需配置 |
+| Sorted Set | 最高 10% | 默认开启 |
+
+对会话存储、计数器、排行榜类负载非常友好。无需迁移动作，升级到 9.1 后自动生效。
+
+## maxmemory 与驱逐策略
+
+```ini
+maxmemory 16gb
+maxmemory-policy allkeys-lru
+maxmemory-samples 10
+```
+
+| policy | 行为 | 适用场景 |
+| --- | --- | --- |
+| `noeviction` | 写命令报错 | 当作持久存储用，禁止丢数据 |
+| `allkeys-lru` | 所有键里近似 LRU | 通用缓存 |
+| `allkeys-lfu` | 所有键里近似 LFU | 热点集中、长尾访问 |
+| `allkeys-random` | 随机驱逐 | 几乎不用 |
+| `volatile-lru` / `volatile-lfu` / `volatile-ttl` / `volatile-random` | 仅在设置了 TTL 的键里挑 | 缓存与持久数据混存 |
+
+<Callout type="warn" title="近似 LRU / LFU">
+Valkey 不维护真正的全局 LRU 链表（代价太大），而是对 `maxmemory-samples` 个随机键采样，挑里面"最差"的驱逐。`samples` 默认 5，调到 10 接近真实 LRU 效果，调到 20 几乎无区别但 CPU 翻倍。
+</Callout>
+
+LFU 模式下还有两个细调：
+
+```ini
+lfu-log-factor 10        # 计数器对数化系数，越大越慢饱和
+lfu-decay-time 1         # 多少分钟不访问衰减一次
+```
+
+## 观测与排查
+
+<Steps>
+<Step>
+**先看全局**：
+
+```bash
+valkey-cli INFO memory
+```
+
+关注 `used_memory_human`、`used_memory_peak_human`、`maxmemory_human`、`mem_fragmentation_ratio`、`evicted_keys`。
+</Step>
+<Step>
+**找内存大户**：
+
+```bash
+valkey-cli --bigkeys --memkeys -i 0.01
+```
+
+`--memkeys` 用 `MEMORY USAGE` 精确测量；`-i 0.01` 让扫描更温柔，避免影响线上。
+</Step>
+<Step>
+**精确测单键**：
+
+```bash
+valkey-cli MEMORY USAGE user:42:profile SAMPLES 0
+```
+
+`SAMPLES 0` 表示完整遍历容器（适合排查异常大键，对线上慎用）。
+</Step>
+<Step>
+**整体内部统计**：
+
+```bash
+valkey-cli MEMORY STATS
+```
+
+返回每类对象、副本缓冲、AOF 缓冲、复制 backlog 等的占用，是排查"used_memory 怎么比 DBSIZE 估的大很多"的利器。
+</Step>
+</Steps>
+
+## 调优清单
+
+- **设置 `maxmemory`，永远要**。不设的话 OOM Killer 会直接把进程干掉。
+- 缓存场景 `maxmemory-policy allkeys-lfu`，长尾命中显著好于 LRU。
+- 开启 `activedefrag yes`，让后台线程在低峰期渐进整理碎片。
+- 大 Hash/Set/ZSet 用 ziplist/listpack 阈值（`hash-max-listpack-entries`、`zset-max-listpack-entries`）控制小集合压缩存储。
+- 业务侧避免超长 key 名（每个键名都要存）。
+- 集群模式下关注 `cluster_stats_messages_*` 的 gossip 流量也算内存的一部分。
+- 升级到 9.1 后再压一遍：很多业务报告 RSS 直接降 15%–25%。
+
+## 何时该分片
+
+单实例最大可用内存的经验上限：
+
+| 副本拓扑 | 推荐上限 | 原因 |
+| --- | --- | --- |
+| 单主单从 | 64 GB | 故障切换时全量同步要传完整 RDB |
+| 多副本 | 128 GB | 同上，但有多副本容错 |
+| 集群分片 | 单分片不超过 32 GB | RDB 加载快、迁移代价低 |
+
+超过该上限，建议走 [集群模式](/docs/cluster) 横向扩展，并配合 9.0 的原子槽迁移做后续扩缩容。
+
+回到 [运维总览](/docs/operations) 了解监控与告警布置；或读 [持久化内部](/docs/internals/persistence-internals) 理解 fork 时的 RSS 翻倍现象。

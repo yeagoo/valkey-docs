@@ -1,0 +1,75 @@
+---
+title: 新手入门：Valkey 是什么，能干什么
+description: 用人话讲清内存键值存储、Valkey 与 Redis 的关系，以及它的典型用途
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+如果你是第一次接触 Valkey（或 Redis），这一篇帮你建立全局认知，再决定深入哪里。
+
+## 什么是"内存键值存储"
+
+你平时用的数据库（MySQL、PostgreSQL）把数据存在**磁盘**上，强项是复杂查询和持久可靠，但每次读写都要碰磁盘，慢。
+
+Valkey 把数据存在**内存**里，用最简单的 **key → value** 模型组织。代价是内存比磁盘贵、容量小；回报是**快到离谱**——单条命令延迟在微秒级，单机轻松几十万到上百万 QPS。
+
+> 经典定位：Valkey 不是用来替代 MySQL 的，而是**站在 MySQL 前面**，扛住那些"读得飞快、改得频繁、能容忍偶尔丢一点"的数据。
+
+## 它到底存什么
+
+Valkey 的 value 不只是字符串，而是一整套**数据结构**，这是它和"普通缓存"的本质区别：
+
+| 类型 | 一句话 | 典型用途 |
+|---|---|---|
+| **String** | 最简单的 key→值 | 缓存、计数器、分布式锁 |
+| **Hash** | 一个 key 下一堆字段 | 存对象（用户资料、购物车） |
+| **List** | 有序链表 | 消息队列、最新动态、聊天记录 |
+| **Set** | 无序去重集合 | 标签、共同好友、抽奖去重 |
+| **Sorted Set** | 带分数的有序集合 | 排行榜、延时队列、限流 |
+| **Stream** | append-only 日志 + 消费组 | 事件流、Kafka 轻量平替 |
+| **Bitmap / HLL / Geo** | 位图 / 基数估计 / 地理 | 签到、UV 统计、附近的人 |
+
+每种结构的 5 分钟实战见 [数据结构系列](/docs/newbie/strings)。
+
+## Valkey 和 Redis 是什么关系
+
+简单说：**Valkey 是 2024 年从最后一个开源版 Redis 分叉出来的，协议命令完全兼容，但许可证是宽松的 BSD。**
+
+- 你会的 Redis 知识、命令、客户端，**100% 用在 Valkey 上**；
+- 你看的大部分 Redis 教程，对 Valkey 也成立；
+- 区别在于许可证、治理方、以及 Valkey 8.0 之后自己迭代的多线程/内存优化。
+
+完整对照见 [Redis 还是 Valkey](/docs/migration/redis-vs-valkey)。
+
+## 它最常被拿来干什么
+
+<Callout type="info">
+下面这些场景，90% 的 Valkey 部署都落在里面。
+</Callout>
+
+1. **缓存层**：把数据库查询结果缓存起来，给 key 设个 TTL（过期时间），扛住热点读。
+2. **会话存储（Session）**：登录态、购物车，多台 Web 服务器共享。
+3. **限流 / 计数**：`INCR` 一条命令做接口限流、点赞数、库存扣减。
+4. **排行榜**：Sorted Set 天生就是干这个的。
+5. **消息队列 / 任务队列**：List 或 Stream 做轻量级队列（Celery、Sidekiq 的后端）。
+6. **分布式锁**：多个进程抢一个资源时的协调。
+7. **发布订阅（Pub/Sub）**：实时通知、聊天室广播。
+8. **（AI 时代新增）向量检索 + 语义缓存 + Agent 记忆**：见 [给 AI 开发者](/docs/for-ai-devs)。
+
+## 几个新手最容易踩的概念
+
+- **持久化不等于关系数据库的可靠**：Valkey 默认偏向性能，断电可能丢最近几秒的写入。要更强保证就开 AOF（`appendfsync always` 最强但最慢）。详见 [运维总览](/docs/operations)。
+- **内存会满**：设好 `maxmemory` 和淘汰策略（`maxmemory-policy`），否则写满之后默认直接报错拒绝写入。
+- **单线程心智模型**：虽然 8.0 加了 I/O 多线程，但命令执行本质仍是单线程串行的——所以**别用 `KEYS *`、别跑慢 Lua 脚本**，会阻塞所有人。
+
+## 下一步
+
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Sparkles, Compass, GitBranch, Server } from 'lucide-react';
+
+<Cards>
+  <Card icon={<Sparkles />} title="5 分钟跑起来" href="/docs/quickstart" description="先把环境装好。" />
+  <Card icon={<Compass />} title="数据结构系列" href="/docs/newbie/strings" description="挨个把数据结构玩明白。" />
+  <Card icon={<GitBranch />} title="Redis 还是 Valkey" href="/docs/migration/redis-vs-valkey" description="搞清楚你在用什么。" />
+  <Card icon={<Server />} title="运维总览" href="/docs/operations" description="配置、持久化、备份。" />
+</Cards>

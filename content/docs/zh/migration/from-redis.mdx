@@ -1,0 +1,195 @@
+---
+title: 从 Redis 迁移到 Valkey
+description: 三种迁移路径、版本边界与零代码改动的客户端切换指南。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { FileDown, GitBranch, Wrench, ShieldAlert } from 'lucide-react';
+
+Valkey 是 Redis 7.2.4（2024 年 4 月）的 BSD-3 分叉，由 Linux Foundation 托管。对大多数生产环境而言，从 Redis 迁到 Valkey 不需要改一行业务代码——RESP 协议、命令集、客户端库、Lua 脚本全部兼容。**真正的难点不在迁移本身，而在源端 Redis 的版本**。本文给出三条经过验证的路径，并明确划出能走"零成本"与必须走"逻辑迁移"的边界。
+
+如果你还没决定要不要迁，先读 [Redis 还是 Valkey](/docs/migration/redis-vs-valkey)。模块迁移单独成篇：[Redis Stack 怎么办](/docs/migration/from-redis-stack)。
+
+## 关键版本边界
+
+<Callout type="warn" title="RDB 格式硬边界">
+Redis CE 7.4 及以上、Redis 8 的 RDB/AOF 文件 **不能** 被 Valkey 直接加载——双方在分叉后引入了互不兼容的字段。如果你的源端是 Redis 7.4+/8，文件搬迁与原生复制两条路都走不通，必须使用逻辑迁移工具（RIOT、RedisShake 等）。
+</Callout>
+
+| 源端 Redis 版本 | 文件搬迁 | 原生复制迁移 | 逻辑工具迁移 |
+| --- | --- | --- | --- |
+| Redis 6.x / 7.0 / 7.2 | 支持 | 支持 | 支持 |
+| Redis 7.4 / 8.x | 不支持 | 不支持 | 支持（推荐） |
+| Redis Stack | 数据层支持，模块需单独处理 | 同左 | 同左 |
+
+## 路径一：停机文件搬迁
+
+适用于可接受 1–10 分钟停写窗口、且源端是 Redis 7.2 及以下的场景。最简单、最可靠。
+
+<Steps>
+<Step>
+**停写**。在应用层下掉所有写入入口（或把客户端切到只读副本），让主节点进入稳定状态。
+</Step>
+<Step>
+**生成最终快照**。在源 Redis 上执行：
+
+```bash
+redis-cli -h 10.0.0.1 -p 6379 SAVE
+redis-cli -h 10.0.0.1 -p 6379 BGREWRITEAOF
+```
+
+等到 `INFO persistence` 中 `rdb_bgsave_in_progress:0` 且 `aof_rewrite_in_progress:0`。
+</Step>
+<Step>
+**停掉 redis-server**：`systemctl stop redis-server`。
+</Step>
+<Step>
+**搬运数据文件**到 Valkey 的 `dir` 目录：
+
+```bash
+rsync -av /var/lib/redis/dump.rdb /var/lib/valkey/
+rsync -av /var/lib/redis/appendonlydir/ /var/lib/valkey/appendonlydir/
+chown -R valkey:valkey /var/lib/valkey
+```
+</Step>
+<Step>
+**首次启动 Valkey 时关闭 AOF**，强制它从 RDB 加载。否则空的 AOF 会优先于 RDB，结果就是空库。
+
+```bash
+valkey-server /etc/valkey/valkey.conf --appendonly no
+```
+</Step>
+<Step>
+**验证 KEYSPACE 与抽样键值**：
+
+```bash
+valkey-cli INFO keyspace
+valkey-cli DBSIZE
+valkey-cli --scan --pattern 'user:*' | head -20 | xargs -I{} valkey-cli TYPE {}
+```
+</Step>
+<Step>
+**重新打开 AOF 并重写**：
+
+```bash
+valkey-cli CONFIG SET appendonly yes
+valkey-cli BGREWRITEAOF
+```
+
+随后将 `appendonly yes` 写回配置文件，重启不再需要覆盖参数。
+</Step>
+<Step>
+**切换流量**，下线旧 Redis。
+</Step>
+</Steps>
+
+## 路径二：基于复制的在线迁移
+
+适用于需要将停写窗口压到秒级、且源端仍是 Redis 7.2 及以下的场景。原理是把 Valkey 当作 Redis 的副本，全量 + 增量同步完成后再做主从切换。
+
+<Steps>
+<Step>
+**部署一台干净的 Valkey**，配置好持久化与 `maxmemory`，确保它能与 Redis 主节点网络互通。
+</Step>
+<Step>
+**让 Valkey 拉取 Redis 数据**：
+
+```bash
+valkey-cli -h valkey-new REPLICAOF redis-old 6379
+```
+
+如果源端开启了 `requirepass`，先 `CONFIG SET masterauth <pwd>`。
+</Step>
+<Step>
+**等待主从同步完成**。轮询：
+
+```bash
+valkey-cli -h valkey-new INFO replication | grep -E 'master_link_status|master_sync_in_progress|master_repl_offset'
+```
+
+直到 `master_link_status:up` 且 `master_sync_in_progress:0`。
+</Step>
+<Step>
+**比对偏移量**：源端 `master_repl_offset` 与 Valkey 端 `slave_repl_offset` 差距应稳定在几 KB 以内。
+</Step>
+<Step>
+**切流量**。在负载均衡层把客户端指到 Valkey；如果用 DNS，注意 TTL。
+</Step>
+<Step>
+**提升 Valkey 为主**：
+
+```bash
+valkey-cli -h valkey-new REPLICAOF NO ONE
+valkey-cli -h valkey-new INFO replication | grep role
+```
+
+确认 `role:master` 后下线 Redis。
+</Step>
+</Steps>
+
+<Callout type="info">
+若 Valkey 端是集群，请用 [valkey-glide](https://valkey.io/) 或 RIOT-X 做槽分片下的并行复制，单条 `REPLICAOF` 只覆盖单分片。
+</Callout>
+
+## 路径三：逻辑迁移工具
+
+这是 Redis 7.4+/8 迁移到 Valkey 的 **唯一** 可行路径，也适用于跨云、跨网络段、需要中途变形（重写键名、过滤前缀）的场景。
+
+<Cards>
+  <Card icon={<Wrench />} title="RIOT / RIOT-X" href="https://redis.github.io/riot/">
+    Redis Labs 出品但跑在客户端侧。`riot replicate` 支持 snapshot / live / live+snapshot 三种模式，可选 DUMP/RESTORE 或 `--struct` 按数据结构重写（突破 RDB 版本边界）。
+  </Card>
+  <Card icon={<GitBranch />} title="RedisShake" href="https://github.com/tair-opensource/RedisShake">
+    阿里开源，支持 RDB 文件解析、伪从机模式、SYNC 模式，与 Valkey 已验证兼容。
+  </Card>
+  <Card icon={<FileDown />} title="Redis-Migrate-Tool" href="https://github.com/vipshop/redis-migrate-tool">
+    唯品会开源，老牌方案，适合从 Twemproxy / Codis 这类老集群迁出。
+  </Card>
+</Cards>
+
+最常用的一行命令（RIOT）：
+
+```bash
+riot replicate \
+  redis://redis-old:6379 \
+  redis://valkey-new:6379 \
+  --mode liveonly \
+  --struct \
+  --progress bar
+```
+
+`--struct` 模式下 RIOT 用 SCAN + 类型感知命令（HGETALL/SADD/ZADD...）重建数据，绕开 RDB 二进制格式，因此对 Redis 7.4+/8 → Valkey 同样有效。
+
+## 客户端：零代码改动
+
+| 语言 | 客户端 | 是否需要改动 |
+| --- | --- | --- |
+| Python | redis-py | 否 |
+| Java | Jedis / Lettuce | 否 |
+| Go | go-redis | 否 |
+| Node.js | node-redis / ioredis | 否 |
+| Rust | redis-rs | 否 |
+| PHP | phpredis / Predis | 否 |
+
+RESP2 与 RESP3 协议帧完全一致；`CLIENT INFO`、`HELLO`、`CLIENT TRACKING` 行为相同。Lua 脚本里 `redis.call` 继续工作（Valkey 同时提供 `server.call` 别名）。如果想用 Valkey 原生的 [valkey-glide](https://github.com/valkey-io/valkey-glide)（多语言、内置集群拓扑感知），可以后续逐步替换，不影响迁移本身。
+
+<Callout type="info" title="INFO 字段语义">
+Valkey 的 `INFO server` 仍然报告 `redis_version:7.2.4`，这是为了让所有按版本号判断特性的旧客户端继续工作。真实版本在 `valkey_version` 与 `server_name:valkey` 两个新字段里。监控脚本如果按 `server_name` 区分两者即可。
+</Callout>
+
+## 验证清单
+
+- `DBSIZE` 与源端一致；分库场景每个 db 都比对。
+- `INFO keyspace` 的 keys/expires/avg_ttl 数量级一致。
+- 抽样 100 个键做 `MEMORY USAGE`，p50/p99 偏差低于 5%。
+- 关键业务读链路 `LATENCY DOCTOR` 无报警。
+- 复制场景下 `master_repl_offset` 差稳定收敛。
+
+## 回滚预案
+
+文件搬迁路径下，保留源 Redis 至少 24 小时不要立刻销毁；复制路径下，切回 Redis 只需把客户端指回旧地址（数据已在切流前同步）。逻辑迁移路径下，RIOT 可以反向再跑一次 `riot replicate valkey -> redis --struct`，注意 Valkey 独有的命令（如 `CLUSTER SLOTS-STATS`）会被跳过。
+
+下一步：阅读 [Redis Stack 怎么办](/docs/migration/from-redis-stack) 处理模块层数据；或 [集群内部](/docs/internals/cluster-internals) 了解 Valkey 9.0 的原子槽迁移如何让后续扩缩容更轻松。

@@ -1,0 +1,149 @@
+---
+title: 5 分钟快速开始
+description: 用 Docker、包管理器或一键云实例，5 分钟跑起一个 Valkey
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+> 目标：本地或云上跑起一个 Valkey，用 `valkey-cli` 连上、写一个 key、读出来。三条路径任选其一。
+
+## 路径一：Docker（最快）
+
+官方镜像是 [`valkey/valkey`](https://hub.docker.com/r/valkey/valkey)，容器内同时带 `valkey-server` 和 `valkey-cli`，默认端口 `6379`。
+
+<Steps>
+
+<Step>
+
+### 拉起一个带持久化的实例
+
+```bash
+docker run --name myvalkey -d \
+  -p 6379:6379 \
+  -v valkey-data:/data \
+  valkey/valkey:9.1 \
+  valkey-server --save 60 1 --appendonly yes
+```
+
+- `--save 60 1`：每 60 秒若有至少 1 个写入就做一次 RDB 快照；
+- `--appendonly yes`：开启 AOF，断电也不丢最近写入；
+- 数据目录在容器内的 `/data`，挂到了命名卷 `valkey-data`。
+
+</Step>
+
+<Step>
+
+### 连上去敲两条命令
+
+```bash
+docker exec -it myvalkey valkey-cli
+```
+
+```text
+127.0.0.1:6379> SET hello "valkey"
+OK
+127.0.0.1:6379> GET hello
+"valkey"
+127.0.0.1:6379> INFO server
+# Server
+redis_version:7.2.4          # ← 注意：为兼容客户端，这里仍报 7.2.4
+valkey_version:9.1.0         # ← 真正的引擎版本看这一行
+server_name:valkey
+```
+
+</Step>
+
+</Steps>
+
+<Callout type="warn">
+**别被 `redis_version:7.2.4` 吓到**——这是 Valkey 为了让老客户端的版本探测逻辑不报错而故意保留的字段。真实版本看 `valkey_version` 和 `server_name`。
+</Callout>
+
+## 路径二：包管理器（裸机 / VM）
+
+<Tabs items={['Ubuntu / Debian', 'RHEL / Fedora / Rocky', 'macOS (Homebrew)', '源码编译']}>
+
+<Tab value="Ubuntu / Debian">
+
+```bash
+sudo apt update
+sudo apt install valkey
+# 想保留 redis-server / redis-cli 这两个命令名（兼容老脚本）：
+sudo apt install valkey-redis-compat
+
+sudo systemctl enable --now valkey-server
+valkey-cli ping        # → PONG
+```
+
+</Tab>
+
+<Tab value="RHEL / Fedora / Rocky">
+
+```bash
+sudo dnf install valkey
+# 注意 RPM 系的兼容包名词序不一样：
+sudo dnf install valkey-compat-redis
+
+sudo systemctl enable --now valkey
+valkey-cli ping
+```
+
+</Tab>
+
+<Tab value="macOS (Homebrew)">
+
+```bash
+brew install valkey
+brew services start valkey
+valkey-cli ping
+# 配置文件在 $(brew --prefix)/etc/valkey.conf
+```
+
+</Tab>
+
+<Tab value="源码编译">
+
+```bash
+git clone https://github.com/valkey-io/valkey.git && cd valkey
+git checkout 9.1.0
+make BUILD_TLS=yes          # 需要 libssl-dev
+sudo make install           # 装到 /usr/local/bin
+valkey-server --version
+```
+
+依赖（jemalloc / lua / hiredis / linenoise）都内置在 `deps/`，只需要 GNU Make + C 编译器。想让 systemd 的 notify 正常工作，先装 `libsystemd-dev`。
+
+</Tab>
+
+</Tabs>
+
+<Callout type="info">
+**兼容包名各发行版不一样**：`valkey-redis-compat`（apt）、`valkey-compat-redis`（dnf）、`valkey-compat`（apk）。它把 `redis-server`、`redis-cli` 等做成指向 `valkey-*` 的软链接，方便不改老脚本。基础包**不含** `redis-*` 命令名。
+</Callout>
+
+## 路径三：一键云实例（不想碰运维）
+
+如果你只是想要一个能用的 endpoint：
+
+| 厂商 | 入口 | 起步价 |
+|---|---|---|
+| **Aiven for Valkey** | 免费层，1 GB、单节点、免信用卡 | **$0** |
+| **AWS ElastiCache Serverless** | 一分钟开好，自动扩缩 | ~$6/月（100 MB 起） |
+| **DigitalOcean Managed Caching** | 单节点 1 GiB | $15/月 |
+| **GCP Memorystore for Valkey** | 1–250 节点集群 | 按节点计费 |
+
+详见 [云上托管对照](/docs/on-cloud) 与 [选型与成本](/docs/cloud/selection)。
+
+## 下一步该读什么
+
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { BookOpen, GitBranch, Server, Bot } from 'lucide-react';
+
+<Cards>
+  <Card icon={<BookOpen />} title="数据结构 5 分钟系列" href="/docs/newbie/strings" description="先把 String/Hash/List/ZSet 玩明白。" />
+  <Card icon={<GitBranch />} title="Redis 还是 Valkey" href="/docs/migration/redis-vs-valkey" description="搞清楚你到底在用什么。" />
+  <Card icon={<Server />} title="运维总览" href="/docs/operations" description="配置、持久化、备份的正确姿势。" />
+  <Card icon={<Bot />} title="给 AI 开发者" href="/docs/for-ai-devs" description="向量、缓存、Agent 记忆的全景图。" />
+</Cards>

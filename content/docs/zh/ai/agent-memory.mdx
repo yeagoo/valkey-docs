@@ -1,0 +1,142 @@
+---
+title: Agent 记忆与会话状态
+description: 用 Valkey 做 Agent 的短期会话与长期语义记忆，原生对接 Mem0 与 LangGraph。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+Agent 的「记忆」分两层：短期会话状态（带 TTL，随会话生命周期淘汰）和长期语义记忆（向量化，可跨会话检索）。Valkey 在同一个引擎里把这两层都装下——List 存对话历史、Hash 存结构化状态、向量索引存语义记忆。
+
+## 为什么微秒级延迟重要
+
+Agent 的一次任务往往是一条由多次往返串起来的循环：取记忆 → 调 LLM → 调工具 → 写记忆 → 再取记忆……每一步都要读写记忆存储。如果记忆后端是单次毫秒级，几十次往返叠加就成了可感知的卡顿；Valkey 的 KV 操作是微秒级，把这部分开销压到几乎可忽略。
+
+AWS 实测：用 Mem0 + Valkey 做记忆，token 用量减少约 **91%**——因为只把相关记忆喂给 LLM，而不是塞整段历史。
+
+## 数据结构选型
+
+| 用途 | 结构 | 命令 |
+| --- | --- | --- |
+| 对话历史 | List | `LPUSH` / `LRANGE` / `DEL` |
+| 结构化记忆 | Hash | `HSET` / `HGETALL`，字段级 TTL `HEXPIRE` / `HTTL` |
+| 键级过期 | 任意 | `EXPIRE` / `TTL` / `PERSIST` |
+| 异步删除 | 任意 | `UNLINK`（非阻塞，优于 `DEL`） |
+| 长期语义记忆 | 向量索引 | `FT.SEARCH` KNN |
+
+### 对话历史（List）
+
+```python
+import valkey
+r = valkey.Valkey()
+
+key = "chat:session:abc"
+r.lpush(key, "user: 帮我订明天去上海的机票")
+r.lpush(key, "assistant: 好的，您从哪个城市出发？")
+r.expire(key, 3600)  # 会话 1 小时后过期
+
+# 取最近 10 条
+history = r.lrange(key, 0, 9)
+```
+
+### 结构化记忆 + 字段级 TTL
+
+`HEXPIRE` / `HTTL` 是 Valkey 9.0 引入的字段级过期，可以让 Hash 里不同字段有不同寿命：
+
+```python
+r.hset("user:123", mapping={"city": "北京", "otp": "8842"})
+# 让 otp 字段 60 秒后过期，city 永久保留
+r.execute_command("HEXPIRE", "user:123", "60", "FIELDS", "1", "otp")
+r.execute_command("HTTL", "user:123", "FIELDS", "1", "otp")
+```
+
+## Mem0：最完整的官方方案
+
+Mem0 把 `"valkey"` 作为一等向量后端 provider，记忆的存取、去重、语义检索都内建：
+
+```python
+from mem0 import Memory
+
+config = {
+    "vector_store": {
+        "provider": "valkey",
+        "config": {
+            "collection_name": "test",
+            "valkey_url": "valkey://localhost:6379",
+            "embedding_model_dims": 1536,
+            "index_type": "hnsw",
+        },
+    }
+}
+
+m = Memory.from_config(config)
+
+# 写入记忆
+m.add(
+    [{"role": "user", "content": "我对花生过敏"}],
+    user_id="user_123",
+)
+
+# 语义检索相关记忆
+results = m.search(query="有什么饮食禁忌？", user_id="user_123", limit=5)
+```
+
+## LangGraph：原生 ValkeySaver
+
+`langgraph-checkpoint-aws` 提供原生的 `ValkeySaver` / `AsyncValkeySaver`（checkpoint）和 `ValkeyStore`（长期存储），连接串支持 `valkey://` 与 `valkeys://`（TLS）：
+
+```python
+from langgraph_checkpoint_aws import ValkeySaver
+
+with ValkeySaver.from_conn_string(
+    "valkey://localhost:6379", ttl_seconds=3600
+) as checkpointer:
+    graph = builder.compile(checkpointer=checkpointer)
+    graph.invoke(
+        {"messages": [("user", "继续上次的话题")]},
+        config={"configurable": {"thread_id": "abc"}},
+    )
+```
+
+`ttl_seconds` 让 checkpoint 自动过期，避免会话状态无限堆积。
+
+## LangChain 对话历史
+
+`RedisChatMessageHistory` 在任意 Valkey 上都能用（wire 兼容），支持 TTL：
+
+```python
+from langchain_redis import RedisChatMessageHistory
+
+history = RedisChatMessageHistory(
+    session_id="user_123",
+    redis_url="redis://valkey-host:6379",
+    ttl=3600,
+)
+history.add_user_message("你好")
+history.add_ai_message("你好，有什么可以帮你？")
+```
+
+## 其他框架
+
+<Tabs items={['LlamaIndex', 'Strands', 'Letta']}>
+<Tab value="LlamaIndex">
+`RedisChatStore` 指向 Valkey URL 即可（wire 兼容，未针对 Valkey 官方测试）。
+</Tab>
+<Tab value="Strands">
+社区原生的 `ValkeySessionManager` 管理会话状态。
+</Tab>
+<Tab value="Letta">
+<Callout type="warn">
+Letta（MemGPT）**不是** Valkey 记忆后端，它用的是 Postgres / pgvector。如果你在用 Letta，记忆层不会落在 Valkey 上。
+</Callout>
+</Tab>
+</Tabs>
+
+## 小结
+
+<Steps>
+<Step>短期会话用 List / Hash + TTL，长期记忆用向量索引。</Step>
+<Step>优先选官方原生集成：Mem0 与 LangGraph `ValkeySaver`。</Step>
+<Step>长期语义记忆的检索底座见 [RAG 架构](/docs/ai/rag)，完整集成清单见[框架集成](/docs/ai/framework-integrations)。</Step>
+</Steps>

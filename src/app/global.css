@@ -1,0 +1,54 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+@source '../../node_modules/fumadocs-ui/dist/**/*.js';
+
+/* Valkey Brand Palette — purple/violet first
+ * Purple   #7C3AED  — primary, CTAs, links, the Valkey accent
+ * Plum     #2E1065  — dark surfaces, headings on light
+ * Fuchsia  #C026D3  — secondary accent, highlights
+ * Lilac    #FAF5FF  — light surface tint
+ */
+@theme {
+  --color-valkey-purple: #7c3aed;
+  --color-valkey-purple-50: #f5f0ff;
+  --color-valkey-purple-100: #ede4ff;
+  --color-valkey-purple-200: #dcccff;
+  --color-valkey-purple-300: #c3a6ff;
+  --color-valkey-purple-400: #a474fb;
+  --color-valkey-purple-500: #7c3aed;
+  --color-valkey-purple-600: #6d28d9;
+  --color-valkey-purple-700: #5b21b6;
+  --color-valkey-purple-800: #4c1d95;
+  --color-valkey-purple-900: #2e1065;
+
+  --color-valkey-plum: #2e1065;
+  --color-valkey-plum-50: #f3eefc;
+  --color-valkey-plum-100: #e0d3f5;
+  --color-valkey-plum-200: #c1a8eb;
+  --color-valkey-plum-300: #9a73db;
+  --color-valkey-plum-400: #6d3fb5;
+  --color-valkey-plum-500: #4c1d95;
+  --color-valkey-plum-600: #3b0f7a;
+  --color-valkey-plum-700: #2e1065;
+  --color-valkey-plum-800: #1f0a47;
+  --color-valkey-plum-900: #130529;
+
+  --color-valkey-fuchsia: #c026d3;
+  --color-valkey-lilac: #faf5ff;
+}
+
+:root {
+  --color-fd-primary: var(--color-valkey-purple-500);
+  --color-fd-accent: var(--color-valkey-fuchsia);
+  --color-fd-accent-foreground: #ffffff;
+  --color-fd-ring: var(--color-valkey-purple-400);
+}
+
+.dark {
+  --color-fd-primary: var(--color-valkey-purple-300);
+  --color-fd-accent: var(--color-valkey-fuchsia);
+  --color-fd-accent-foreground: #ffffff;
+  --color-fd-ring: var(--color-valkey-purple-200);
+}

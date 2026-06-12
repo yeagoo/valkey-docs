@@ -1,0 +1,82 @@
+---
+title: Versions & roadmap
+description: Valkey release timeline from 7.2 to 9.1, headline features, support windows, and which version to pick.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Release timeline
+
+| Version | Released | Status | Headline features |
+| --- | --- | --- | --- |
+| 7.2 | 2024-04 | LTS (maintained) | First Valkey release, binary-compatible with Redis 7.2.4 |
+| 8.0 | 2024-09 | maintained | Multi-threaded I/O re-architected, embedded keys, hash field TTL, around 1.2M QPS single node |
+| 8.1 | 2025-03 | LTS | Experimental RDMA transport, scripting Function GA, RESP3 improvements |
+| 9.0 | 2025-10 | maintained | valkey-search GA, cluster shard groups, RDB v12, IPv6 cluster bus |
+| 9.1 | 2026-05 | LTS-track (current) | RDMA production-ready, per-key memory accounting, hybrid vector + BM25 search |
+
+## What each release actually means
+
+### 7.2 — the safe choice
+
+Identical feature set to Redis 7.2.4, plus security backports. If your operations team is conservative or you're running compliance-critical workloads where surprise changes are expensive, this is your line. Maintained until at least mid-2027.
+
+### 8.0 — the performance jump
+
+The big one. I/O threads were redone so multiple cores can serve client traffic concurrently. Single-node throughput roughly doubled on hardware with 8+ cores. `OBJECT ENCODING` changed for many small values to embed keys directly in dictEntry, saving roughly 16 bytes per key. Hash field-level TTL via `HEXPIRE` / `HPEXPIRE` / `HEXPIREAT` arrived.
+
+### 8.1 — LTS with RDMA experiment
+
+Long-term support line. Most important addition was experimental RDMA transport, which dropped P99 latency from around 200μs to around 50μs on RoCE / InfiniBand hardware. Function (durable Lua replacement) became GA. RESP3 push messages got cleaner.
+
+### 9.0 — the AI release
+
+`valkey-search` module went GA — vector indexes with HNSW, hybrid filter + KNN. Cluster shard groups let you organize a 10k-node cluster as N replication groups, reducing gossip overhead about 30 percent. RDB bumped to version 12; old Redis builds can no longer read it (one-way compatibility).
+
+### 9.1 — current LTS-track
+
+RDMA promoted to production. Per-key memory accounting (`OBJECT MEMORY key`) for debugging. Hybrid search query language stabilized. Default `io-threads-do-reads yes`. Modules in the bundle aligned on a common ABI.
+
+## Support policy
+
+- **LTS lines (7.2, 8.1, and 9.1 going forward)** receive security and critical bug fixes for at least 24 months from release.
+- **Non-LTS lines (8.0, 9.0)** receive fixes until the next LTS supersedes them.
+- Cadence target is roughly one major every 6-9 months; the TSC discusses any deviations on the community call.
+
+The full support matrix is in [github.com/valkey-io/valkey/blob/unstable/RELEASE.md](https://github.com/valkey-io/valkey).
+
+## Which version to pick
+
+| Scenario | Recommendation |
+| --- | --- |
+| New project, want long support | 9.1 (current LTS-track) |
+| Conservative ops, want maximum stability | 8.1 (proven LTS) |
+| Already on 7.x, no AI features needed | stay on 7.2 until 2027 |
+| Migrating from Redis 7.2 | 8.1 (smooth path; RDB still compatible) |
+| AI / vector workload | 9.1, modules enabled |
+| RDMA-equipped hardware | 9.1, enable `tls-port` and `rdma-port` |
+
+<Callout type="warn">
+Upgrading **across the 7.4 boundary** (i.e., to 8.x or later) writes a new RDB format. Plan a downgrade path: keep the old RDB until you've verified the new version, because the new RDB cannot be read by 7.x.
+</Callout>
+
+## Compatibility with Redis
+
+| Boundary | Valkey says | Redis says |
+| --- | --- | --- |
+| RESP wire protocol | identical | identical |
+| Client libraries | unchanged | unchanged |
+| Lua scripts | run unchanged | run unchanged |
+| Modules ABI | mostly compatible | mostly compatible |
+| RDB v11 and earlier | reads & writes | reads & writes |
+| RDB v12+ | writes (8.0+) | does not read |
+| Cluster shard groups | 9.0+ | not implemented |
+| Hash field TTL | 8.0+ | 7.4+ added similar commands |
+
+In practice, application code does not need to change when switching engines. Operations tooling (backups, replication, CDC) may.
+
+## Looking ahead
+
+The 9.2 cycle is open at time of writing. Frequently-mentioned candidates: hybrid search ranking improvements, cluster bus over RDMA, in-server multimodal embedding support, and tighter Mem0 / LangGraph integration. None are committed until they merge to `unstable` and the TSC approves them for the release branch.
+
+For a deeper view of where Valkey is heading, see [Frontier and future (CN)](/docs/zh/story/frontier).

@@ -1,0 +1,152 @@
+---
+title: 集群模式：分片、扩缩容与原子槽迁移
+description: 16384 哈希槽、哈希标签、扩缩容流程，以及 Valkey 8.0 分槽字典与 9.0 原子槽迁移。
+---
+
+Valkey 集群把数据分散到多个主节点，实现水平扩展与高可用。本文讲解槽分配模型、扩缩容流程，以及 Valkey 8.0 / 9.0 在内存与迁移上的关键改进。集群的底层机制详见 [深入原理：集群内部](/docs/internals/cluster-internals)。
+
+## 哈希槽与键分布
+
+集群把键空间划分为 **16384 个哈希槽（hash slot）**。每个键归属的槽由下式决定：
+
+```text
+slot = CRC16(key) mod 16384
+```
+
+每个主节点负责一段连续或离散的槽区间。读写某个键时，客户端根据其槽找到对应节点。
+
+### 哈希标签
+
+如果希望多个键落在同一槽（以便使用多键命令、事务、Lua），用花括号包裹键名中需要参与哈希的部分：
+
+```text
+user:{123}:profile
+user:{123}:sessions
+```
+
+只有 **第一个 `{...}` 内的内容** 参与 CRC16 计算，因此上面两个键都映射到 `123` 决定的同一槽。
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+<Callout type="warn">
+跨槽的多键操作（如 `MSET` 不同槽的键、跨槽 `MGET`）会报 `CROSSSLOT` 错误。务必用哈希标签把需要一起操作的键约束到同一槽。
+</Callout>
+
+## 启用集群
+
+```ini
+cluster-enabled yes
+cluster-config-file nodes.conf
+cluster-node-timeout 5000
+```
+
+`nodes.conf` 由 Valkey 自动维护，记录集群拓扑，请勿手工编辑。
+
+## 创建集群
+
+准备好若干运行中的节点后，用 `valkey-cli` 一键编排。`--cluster-replicas 1` 表示每个主配 1 个副本：
+
+```bash
+valkey-cli --cluster create \
+  10.0.0.1:6379 10.0.0.2:6379 10.0.0.3:6379 \
+  10.0.0.4:6379 10.0.0.5:6379 10.0.0.6:6379 \
+  --cluster-replicas 1
+```
+
+上例 6 个节点形成 3 主 3 从。检查状态：
+
+```bash
+valkey-cli --cluster check 10.0.0.1:6379
+valkey-cli --cluster info 10.0.0.1:6379
+```
+
+## 扩容与缩容
+
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+### 扩容：加入新主并分槽
+
+<Steps>
+<Step>
+
+把新节点加入集群（作为主）：
+
+```bash
+valkey-cli --cluster add-node 10.0.0.7:6379 10.0.0.1:6379
+```
+
+加副本则追加 `--cluster-slave`（并可用 `--cluster-master-id` 指定其主）。
+
+</Step>
+<Step>
+
+把一部分槽迁移到新主。交互式：
+
+```bash
+valkey-cli --cluster reshard 10.0.0.1:6379
+```
+
+脚本化（无人值守）：
+
+```bash
+valkey-cli --cluster reshard 10.0.0.1:6379 \
+  --cluster-from <源节点ID> \
+  --cluster-to <目标节点ID> \
+  --cluster-slots 4096 \
+  --cluster-yes
+```
+
+</Step>
+<Step>
+
+可选：让集群自动均衡各主的槽数量：
+
+```bash
+valkey-cli --cluster rebalance 10.0.0.1:6379
+```
+
+</Step>
+</Steps>
+
+### 缩容：迁出槽并删除节点
+
+先把待下线节点的槽全部 reshard 到其他主，确认它不再持有任何槽后再删除：
+
+```bash
+valkey-cli --cluster del-node 10.0.0.1:6379 <待删除节点ID>
+```
+
+## 分槽字典（Valkey 8.0）
+
+8.0 之前，每个节点用一个全局哈希表存所有键，每个键都要存一份所属槽的信息。8.0 改为 **每个槽一个独立字典（per-slot dictionary）**，共 16384 个：
+
+- 不再为每个键单独存槽信息，约 **节省 24 字节/键**（整体内存降约 20%；例如 630 万键的实例从约 693 MB 降到约 550 MB）；
+- 扩容时只对单个槽的字典做局部 rehash，**延迟尖刺更小**；
+- 升级到 8.0 后 **自动生效**，无需配置。
+
+<Callout type="info">
+分槽字典对应用透明，是纯粹的内部优化。键越多、单实例内存越大，收益越明显。
+</Callout>
+
+## 原子槽迁移（Valkey 9.0）
+
+旧的 reshard 本质是 **逐键 `MIGRATE`**：一个键一个键地搬，槽很大时耗时长、迁移过程中存在请求重定向开销。
+
+Valkey 9.0 引入 **原子槽迁移（atomic slot migration）**：基于快照、用单条命令完成整个槽的迁移，**零停机**，不再逐键搬运。整槽要么迁移成功、要么不变，语义更干净，大键多键场景下尤其平滑。
+
+<Callout type="info">
+原子槽迁移由 `valkey-cli --cluster` 相关子命令在 9.0+ 集群上自动采用，是对运维方式的底层改进，扩缩容流程基本不变但更稳更快。
+</Callout>
+
+## 其他新特性
+
+| 特性 | 版本 | 说明 |
+| --- | --- | --- |
+| 集群多数据库（multi-database） | 9.0 | 集群模式下支持多个逻辑数据库 |
+| `CLUSTERSCAN` | 9.1 | 跨集群遍历键，无需逐节点 `SCAN` |
+
+## 下一步
+
+- [深入原理：集群内部](/docs/internals/cluster-internals)：槽迁移、gossip 协议与拓扑维护的实现细节。
+- [复制与高可用](/docs/replication-ha)：集群内的故障转移命令。
+- [运维总览](/docs/operations)：单机配置与持久化。

@@ -1,0 +1,89 @@
+---
+title: Redis 还是 Valkey？2026 年的完整对照
+description: 许可证分叉始末、线程模型、性能、生态与 Redis 8 的 AGPL 反扑——帮你做决定
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+这大概是你最想搞清楚的一个问题。先给结论，再讲细节。
+
+<Callout type="info">
+**一句话结论**：对**新项目**和**纯缓存/会话/队列/向量**这类常见场景，Valkey 是更理性的默认选择——同等或更好的性能、明显更低的托管成本、宽松的 BSD 协议、中立的基金会治理。除非你深度绑定了 Redis 的某个专有模块（如 TimeSeries）或 Redis Enterprise 特性，否则没有非用 Redis 不可的理由。
+</Callout>
+
+## 一、为什么会有 Valkey：许可证分叉始末
+
+- **2024-03-20**：在 BSD-3 协议下走了约 15 年的 Redis，突然改用**源可见**的双许可证 **RSALv2 + SSPLv1**（都不是 OSI 认证的开源协议）。Redis 7.4 起套用新协议。
+- **动机**：Redis 公司想阻止云厂商（AWS ElastiCache、Google、Oracle 等）"白嫖"——卖托管 Redis 赚基础设施的钱，却只有约 1% 用户转化为 Redis Enterprise 付费。
+- **8 天后（2024-03-28）**：来自 Amazon、Google、Alibaba、Ericsson、Tencent、Huawei 的前 Redis 维护者，从最后一个 BSD 版本 **Redis 7.2.4** 分叉出 **Valkey**，交给 **Linux 基金会**托管。
+- **反转（2025-05）**：Redis 8.0 GA，**加回 AGPLv3**（OSI 认证但是 copyleft），还把创始人 antirez 请了回来。但此时 Valkey 已经拿下了大量迁移（如 Aiven 迁了约 1.5 万台服务器），社区共识是：AGPL 这步反转**很难把人请回来**，信任损伤才是长期变量。
+
+详细故事见 [分叉的故事](/docs/story/history)。
+
+## 二、许可证：这才是核心差异
+
+| | **Valkey** | **Redis 8+** |
+|---|---|---|
+| 协议 | **BSD-3-Clause**（宽松，OSI） | AGPLv3（copyleft，OSI）/ RSALv2 / SSPLv1 三选一 |
+| 把它嵌进你的产品卖 | ✅ 无限制 | AGPL 要求网络服务也开源；RSAL/SSPL 限制做竞品托管 |
+| 治理 | Linux 基金会，多厂商 TSC（同一公司 ≤ 1/3） | Redis 公司单一厂商 |
+
+<Callout type="warn">
+**AGPLv3 是 copyleft**：如果你修改了 Redis 并以网络服务形式对外提供，理论上要公开你的修改源码。很多 SaaS、AI 创业公司因此回避 AGPL——这正是 Valkey 的 BSD-3 对他们的吸引力所在。
+</Callout>
+
+## 三、性能与线程模型
+
+Valkey 8.0 的异步多线程是它技术上拉开差距的关键：
+
+- **Valkey 8.0**：异步 I/O 多线程，AWS r7g 上 **~120 万 QPS**（此前约 38 万）；双通道复制；per-slot 字典。
+- **Valkey 9.0**：约 2000 节点集群 **>10 亿 RPS**，单机比 8.1 再 +40%。
+- **Valkey 9.1**：单机 **~210 万 RPS**。
+- **Redis 8**：自己也大幅优化，宣称命令最多快 87%、吞吐最多 2×。
+
+<Callout type="info">
+**别迷信裸 QPS 数字**：上面这些数都依赖具体的实例型号、负载大小、线程数、pipeline 深度，**不能跨版本/跨厂商直接比**。引用时一定带上测试条件。第三方基准里，Valkey 8.1 相对 Redis OSS 大致 ops/s +8%、P99 延迟 -22%、内存 -20%（第三方数据，仅供参考）。
+</Callout>
+
+## 四、兼容性：迁移到底有多平滑
+
+- **线协议**：RESP2/RESP3 完全一致，**现有 Redis 客户端零改动**直接连。
+- **命令集**：7.2 基线完全一致；之后 Valkey 自己加了 `HEXPIRE` 系列（9.0）、`HGETDEL`/`MSETEX`/`CLUSTERSCAN`（9.1）等。
+- **数据文件**：Redis **≤ 7.2** 的 RDB/AOF 可被 Valkey 直接加载。
+- **⚠️ 硬边界**：**Redis CE 7.4+ / Redis 8 产生的 RDB，Valkey 读不了**——分叉后两边格式各自演化。这是最常见的迁移坑。模块数据（如 RedisJSON）也不能靠 RDB 直接搬。
+
+迁移实操见 [从 Redis 迁移](/docs/migration/from-redis)。
+
+## 五、生态与模块
+
+Redis 8 把 Redis Stack 的模块（搜索/JSON/Bloom/TimeSeries）折进了核心。Valkey 用独立模块对应：
+
+| Redis 能力 | 命令 | Valkey 对应 |
+|---|---|---|
+| RediSearch / 向量 | `FT.*` | **valkey-search**（HNSW KNN + 二级索引） |
+| RedisJSON | `JSON.*` | **valkey-json**（RDB 兼容 RedisJSON v2） |
+| RedisBloom | `BF.*` 等 | **valkey-bloom**（仅 Bloom，无 Cuckoo/CMS/TopK） |
+| RedisTimeSeries | `TS.*` | **暂无对应模块**（功能缺口） |
+
+## 六、决策清单
+
+| 如果你…… | 倾向 |
+|---|---|
+| 做新项目，用作缓存/会话/队列/向量 | **Valkey** |
+| 对 copyleft（AGPL）或源可见协议有合规顾虑 | **Valkey** |
+| 想要 AWS/GCP/OCI 上最低成本的托管 | **托管 Valkey** |
+| 需要 RedisTimeSeries / RedisGraph / Redis Enterprise 特有能力 | **Redis** |
+| 已深度绑定 Redis 8 的某些新特性 | **评估后再说** |
+| 在中国，要合规托管 | 腾讯云 Valkey 8.0 / 阿里 Tair（兼容 Valkey）/ AWS 中国区 |
+
+## 七、那 Redis 8 加回 AGPL 之后呢？
+
+它让 Redis 重新成为"开源"（AGPL 经 OSI 认证），也补回了性能，但：
+
+1. 来得比 Valkey 晚约一年，期间大迁移已经发生；
+2. AGPL 的 copyleft 对商业用户仍是顾虑；
+3. 社区共识：**信任一旦受损，很难逆转**。
+
+所以现在的格局不是"开源 Valkey vs 闭源 Redis"，而是**两个活跃的开源项目在竞争**——这对用户是好事。
+
+延伸阅读：[版本与路线图](/docs/versions) · [从 Redis 迁移](/docs/migration/from-redis) · [社区治理](/docs/story/governance)。

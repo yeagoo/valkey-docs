@@ -1,0 +1,158 @@
+---
+title: 错误码与故障诊断
+description: Valkey 常见错误一字典，告诉你为什么、怎么修、怎么预防。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+按出现的"层"分类：认证 / ACL → 集群 → 复制 → 内存与持久化 → 脚本 → 连接 → 协议。
+
+## 认证与 ACL
+
+### NOAUTH Authentication required
+
+- **什么时候出现**：连接后没执行 `AUTH` 或 URI 里没带密码就发其它命令。
+- **原因**：`requirepass` 或 ACL 默认用户被设了密码。
+- **解决**：客户端连接 URI 写为 `valkey://default:yourpass@host:6379` 或显式 `AUTH user pass`。
+- **预防**：连接池配置统一鉴权，禁用裸 `redis://host:6379`。
+
+### WRONGPASS invalid username-password pair
+
+- **何时**：AUTH 传错。
+- **原因**：密码错、用户名错、或用户没启用（`ACL SETUSER name on`）。
+- **修**：`ACL LIST` 查看用户状态；密码区分大小写。
+- **预防**：密码统一放在 secrets manager，不要硬编码进代码。
+
+### NOPERM this user has no permissions to run the X command
+
+- **何时**：ACL 限制了命令 / key 模式 / 频道。
+- **原因**：该用户没有 `+command` 或 `~keyprefix:*`。
+- **修**：`ACL SETUSER name +get ~app:*` 添加权限；或临时切到 default。
+- **预防**：上线前在 staging 跑一遍业务命令集合做 ACL grep。
+
+## 集群
+
+### MOVED 12182 10.0.0.5:6379
+
+- **何时**：客户端发的 key 不属于当前节点。
+- **原因**：集群 hash slot 在另一节点。
+- **修**：客户端开启 cluster 模式（valkey-cli `-c`，go-redis `NewClusterClient`），自动跟随重定向。
+- **预防**：不要用单机客户端连集群。
+
+### ASK 12182 10.0.0.5:6379
+
+- **何时**：slot 正在迁移，部分 key 已经在新节点。
+- **原因**：reshard 过程中。
+- **修**：客户端应支持 ASK：先 `ASKING` 再重发命令。主流 cluster client 自动处理。
+
+### CROSSSLOT Keys in request don't hash to the same slot
+
+- **何时**：`MGET a b`、`MSET a v b v`、事务等多 key 命令，key 不在同一槽。
+- **原因**：集群分片把 key 散到不同节点了。
+- **修**：用 hash tag——`{user:42}:profile` 和 `{user:42}:cart` 会 hash 到同一槽。
+- **预防**：业务设计阶段就明确"哪些 key 必须共片"。
+
+### CLUSTERDOWN Hash slot not served
+
+- **何时**：集群没覆盖所有 16384 个槽，或大量节点掉线。
+- **原因**：分配未完成 / 多主同时故障 / 网络分区。
+- **修**：`CLUSTER INFO` 看 `cluster_state` 和 `cluster_slots_assigned`；`CLUSTER ADDSLOTS` 或恢复故障节点。
+- **预防**：每主至少 1 个从；监控 `cluster_state:ok`。
+
+## 复制
+
+### MASTERDOWN Link with MASTER is down
+
+- **何时**：从节点连不上主。
+- **原因**：网络、主进程挂、防火墙、密码不匹配。
+- **修**：从节点上 `INFO replication`；检查 `master_link_status:down`；查 `master_last_io_seconds_ago`。
+- **预防**：开启 `replica-priority` + Sentinel 自动切。
+
+### LOADING Valkey is loading the dataset in memory
+
+- **何时**：实例重启正在加载 RDB / AOF。
+- **原因**：大数据集启动需要时间。
+- **修**：等待。`INFO persistence` 看 `loading:1` 和进度。
+- **预防**：启动期不要把流量打进来；用 readiness probe。
+
+### READONLY You can't write against a read only replica
+
+- **何时**：往从节点写。
+- **原因**：客户端连错节点 / 主从切换后没刷新拓扑。
+- **修**：连主；或 cluster 客户端开启 read-from-replica 时确保只读命令。
+- **预防**：使用 Sentinel / Cluster 客户端，避免硬编码 IP。
+
+## 内存与持久化
+
+### OOM command not allowed when used memory > 'maxmemory'
+
+- **何时**：写命令触发，但实例没有可用的淘汰策略。
+- **原因**：`maxmemory-policy noeviction`，或者所有 key 都没有 TTL 而策略是 `volatile-*`。
+- **修**：`CONFIG SET maxmemory-policy allkeys-lru`（如果场景允许淘汰）；或扩容；或主动删大 key。
+- **预防**：设 maxmemory 一定要配相应 policy；监控 `used_memory / maxmemory` 比值。
+
+### MISCONF Valkey is configured to save RDB snapshots, but it is currently not able to persist on disk
+
+- **何时**：BGSAVE 失败（磁盘满、权限、目录不存在），又开了 `stop-writes-on-bgsave-error yes`。
+- **原因**：磁盘问题。
+- **修**：`df -h` / `ls -l` 检查；修了磁盘后 `BGSAVE` 一次确认；临时关 `CONFIG SET stop-writes-on-bgsave-error no`（不推荐长期）。
+- **预防**：监控磁盘 + RDB 最后成功时间（`rdb_last_bgsave_status`）。
+
+## 脚本
+
+### BUSY Valkey is busy running a script
+
+- **何时**：Lua / Function 跑太久（超过 `busy-reply-threshold`，默认 5000ms）。
+- **原因**：脚本里 O(N) 大循环、或外部依赖卡住。
+- **修**：`SCRIPT KILL`（如果未写过数据）；写了就只能 `SHUTDOWN NOSAVE` 然后从 RDB 恢复——慎用。
+- **预防**：脚本里禁用大集合扫描；逻辑能拆就拆出来。
+
+### NOSCRIPT No matching script
+
+- **何时**：`EVALSHA` 给的 hash 在服务端不存在。
+- **原因**：服务重启 / 主从切换后脚本缓存清空。
+- **修**：客户端 fallback 到 `EVAL` 重新装；优先用 `SCRIPT LOAD` 预热。
+- **预防**：用 Valkey 7+ 的 Function（FUNCTION LOAD），状态持久化。
+
+## 连接 / 协议
+
+### ERR max number of clients reached
+
+- **何时**：连接数撞到 `maxclients`（默认 10000）。
+- **原因**：连接池泄漏 / 应用扩容没扩 Valkey。
+- **修**：`CLIENT LIST` 找大户；`CONFIG SET maxclients 30000`（注意 ulimit）。
+- **预防**：每个应用配统一连接池；监控 `connected_clients`。
+
+### ERR DUMP payload version or checksum are wrong
+
+- **何时**：`RESTORE` 时 dump 数据来自不兼容的 RDB 版本。
+- **原因**：从 Redis 7.4+ / Valkey 8+ 的 RDB 想直接喂给老版本；或网络途中 dump 被截断。
+- **修**：保证版本一致；用 `--rdb` 全量迁移；或用 `valkey-cli --pipe` 走命令重放。
+- **预防**：迁移前对齐版本和 module 列表。
+
+### ERR Protocol error: invalid bulk length / expected '$'
+
+- **何时**：客户端发出的不是合法 RESP。
+- **原因**：客户端 bug、把 HTTP / TLS 流量发到了非 TLS 端口、`\r\n` 错位。
+- **修**：抓包看实际 bytes；确认端口是否启用 TLS（连 TLS 端口要用 `--tls`）。
+- **预防**：客户端库别用太老版本；TLS 端口和明文端口物理隔开。
+
+### ERR unknown command 'XXX'
+
+- **何时**：服务端没这条命令。
+- **原因**：版本太老 / 是 modules 命令但 module 没加载 / ACL 隐藏了。
+- **修**：`COMMAND INFO XXX` 看是否存在；`MODULE LIST` 看模块；`ACL GETUSER` 看权限。
+- **预防**：客户端启动时跑 `COMMAND` 探测能力，做 fallback。
+
+## 通用诊断流程
+
+<Callout type="info">
+遇到陌生错误的标准动作：
+
+1. `INFO server` 拿版本，确认是 Valkey 还是 Redis、哪个版本。
+2. `INFO replication` / `INFO persistence` / `INFO memory` 看健康。
+3. `CLIENT LIST` 看连接来源。
+4. `SLOWLOG GET 10` 看慢命令。
+5. `MONITOR`（短时间）看实时命令——生产慎用。
+6. 如果是集群，`CLUSTER INFO` + `CLUSTER NODES`。
+</Callout>

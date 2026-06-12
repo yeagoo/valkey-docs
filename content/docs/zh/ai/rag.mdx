@@ -1,0 +1,118 @@
+---
+title: 用 Valkey 搭 RAG：架构与选型
+description: Valkey 在 RAG 里同时承担向量库、缓存与会话存储，附 ValkeyVectorStore 原生代码与选型对比。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+RAG（检索增强生成）的核心是「先检索相关片段，再让 LLM 基于片段作答」。Valkey 把 embedding、chunk 文本和元数据一起放在内存里，提供 KNN top-k 检索。真正的卖点不是单点向量库，而是**统一引擎**：同一套 Valkey 同时扮演向量库、[语义缓存](/docs/ai/semantic-cache)和[会话存储](/docs/ai/agent-memory)，省掉跨系统同步。
+
+## Valkey 在 RAG 中的位置
+
+```text
+                     ┌──────────────────────────┐
+   用户提问 ──embed──▶│        Valkey            │
+                     │  · 向量索引 (KNN top-k)   │
+                     │  · 语义缓存 (命中即返回)  │
+                     │  · 会话 / Agent 记忆      │
+                     └────────────┬─────────────┘
+                          相关 chunk ▼
+                     ┌──────────────────────────┐
+                     │           LLM            │──▶ 回答
+                     └──────────────────────────┘
+```
+
+检索发生在延迟敏感的主链路上——这正是把向量放进内存数据库的理由。
+
+## 存储：Hash vs JSON
+
+<Tabs items={['Hash', 'JSON']}>
+<Tab value="Hash">
+向量存为原始 float32 小端字节流，文本和元数据存为普通字段。最直接，写入开销最低。
+
+```python
+import numpy as np, valkey
+r = valkey.Valkey()
+
+r.hset("doc:1", mapping={
+    "embedding": np.array(vec, dtype=np.float32).tobytes(),
+    "text": "Valkey 是 BSD-3 协议的内存数据库……",
+    "category": "database",
+})
+```
+</Tab>
+<Tab value="JSON">
+用 valkey-json 把整篇文档（文本 + 元数据 + 向量）放在一个键里。注意向量必须是「带方括号的 JSON 字符串」，不能是原生数组。
+
+```python
+import json
+r.execute_command("JSON.SET", "doc:1", "$", json.dumps({
+    "embedding": "[0.1,0.2,0.3]",  # 字符串，不是数组
+    "text": "……",
+    "category": "database",
+}))
+```
+</Tab>
+</Tabs>
+
+建索引时，Hash 用 `ON HASH`（默认），JSON 用 `ON JSON` 加 JSONPath 别名。详见 [valkey-search](/docs/ai/vector-search)。
+
+## 元数据过滤
+
+RAG 常需要「只在某个类目/某个租户下检索」。把过滤条件前置到 KNN 之前：
+
+```text
+FT.SEARCH ragIndex "@category:{database} @lang:{zh}=>[KNN 4 @embedding $q]" PARAMS 2 q "<blob>" DIALECT 2
+```
+
+TAG 用 `@f:{a|b}`，数值范围用 `@f:[min max]`，AND 用空格，OR 用竖线，NOT 用 `-@f:{x}`。
+
+## ValkeyVectorStore：LangChain 原生
+
+LangChain 在 `langchain-aws` 里提供了**原生**的 `ValkeyVectorStore`，底层用 Valkey GLIDE 客户端（不是 redis-py）：
+
+```python
+from langchain_aws.vectorstores import ValkeyVectorStore
+from langchain_openai import OpenAIEmbeddings
+
+docs = [...]  # List[Document]
+embeddings = OpenAIEmbeddings()
+
+store = ValkeyVectorStore.from_documents(
+    docs,
+    embeddings,
+    valkey_url="valkey://endpoint:6379",
+)
+
+results = store.similarity_search("Valkey 适合做 RAG 吗？", k=4)
+```
+
+<Callout type="info">
+优先用 `ValkeyVectorStore`（langchain-aws），而不是 langchain-redis 的 `RedisVectorStore`。后者会自动创建一个 TEXT 字段，在低于 1.2.0 的 valkey-search 上会失败。
+</Callout>
+
+## 选型对比
+
+| 维度 | Valkey + valkey-search | pgvector | Pinecone | Milvus |
+| --- | --- | --- | --- | --- |
+| 形态 | 内存数据库 | Postgres 扩展 | 托管 SaaS | 专用向量库 |
+| 检索延迟 | 最快档（约 3.9ms） | 较高 | 中等 | 中等 |
+| 统一能力 | 缓存 + 向量 + 会话三合一 | 仅向量（在 PG 内） | 仅向量 | 仅向量 |
+| 成本模型 | 受 RAM 约束 | 最便宜 | 最贵 | 运维重 |
+| 规模 | 单节点 1M～100M+，集群更高 | 低于 1000 万较舒适 | 托管弹性 | 十亿级 |
+
+## 什么时候选 Valkey
+
+<Callout type="info">
+当**向量检索在延迟敏感的主链路上**，并且你**希望缓存 / RAG / 会话用同一套系统**时，选 Valkey。如果只是离线、低频、对延迟不敏感且向量量不大，pgvector 更省钱；要十亿级向量则考虑 Milvus。
+</Callout>
+
+## 下一步
+
+<Steps>
+<Step>用 [valkey-search](/docs/ai/vector-search) 建好向量索引。</Step>
+<Step>叠加[语义缓存](/docs/ai/semantic-cache)进一步降本。</Step>
+<Step>把会话与长期记忆也放进同一套 Valkey，见 [Agent 记忆](/docs/ai/agent-memory)。</Step>
+</Steps>

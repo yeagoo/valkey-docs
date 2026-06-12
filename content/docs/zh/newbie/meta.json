@@ -1,0 +1,14 @@
+{
+  "title": "数据结构 5 分钟系列",
+  "pages": [
+    "strings",
+    "hashes",
+    "lists",
+    "sets",
+    "sorted-sets",
+    "streams",
+    "pubsub",
+    "ttl-and-eviction",
+    "scripting-and-functions"
+  ]
+}

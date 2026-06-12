@@ -1,0 +1,190 @@
+---
+title: 集群内部：槽、Gossip 与原子迁移
+description: 16384 槽散列、Gossip 总线、MOVED/ASK 重定向、9.0 原子槽迁移与多数据库支持。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Network, Shuffle, GitMerge, Database } from 'lucide-react';
+
+Valkey 集群把键空间切成 **16384 个哈希槽**，分布在多组主从之间。这套设计在 Redis 3.0 就定型了，但 Valkey 在 8.0/9.0/9.1 一路把分片层重写得几乎认不出来——按槽字典、原子槽迁移、多数据库、双通道复制全部落地。本文按槽 → 节点通信 → 重定向 → 迁移 → 扩展性的顺序逐层讲清。
+
+## 槽：CRC16 + 哈希标签
+
+键到槽的映射很简单：
+
+```text
+slot = CRC16(key) mod 16384
+```
+
+如果键名里包含 `{...}`，只对 `{}` 内的子串做 CRC16——这就是 **哈希标签**，用于把相关键钉在同一个槽里以支持事务/Lua：
+
+```bash
+SET {order:42}.items "[...]"
+SET {order:42}.status "paid"
+# 两个键一定落到同一个槽
+```
+
+工程意义：
+
+- 同一笔事务、Pipeline、Lua 脚本里的键必须落在同一个槽——靠哈希标签强制。
+- 跨槽 `MGET`/`MSET` 在集群模式下会被拒绝（除非客户端实现按槽分批）。
+- 评估热点分布的最小粒度就是槽，而不是节点：观测每个槽的 `CLUSTER COUNTKEYSINSLOT`。
+
+## 节点通信：Gossip 总线
+
+每个节点除了对外的数据端口（默认 6379），还监听一个 **集群总线端口**，默认是 `数据端口 + 10000`（即 16379）。集群成员之间通过这条总线交换：
+
+- 节点存活与角色（PING/PONG 携带）。
+- 槽归属（哪个节点拥有哪些槽）。
+- 选举投票（FAILOVER_AUTH_REQUEST/ACK）。
+- 配置纪元（epoch）。
+
+```ini
+cluster-enabled yes
+cluster-node-timeout 15000    # ms，超时判定节点 PFAIL
+cluster-port 16379            # 9.0 起可显式指定
+cluster-announce-ip 10.0.0.1  # NAT/容器环境必填
+cluster-announce-port 6379
+cluster-announce-bus-port 16379
+```
+
+<Callout type="warn" title="cluster-node-timeout 的影响">
+这个超时同时决定了：故障检测速度、副本接管延迟、`MIGRATE` 的最长阻塞时间。设得过小会因网络抖动误判主节点死掉，设得过大故障恢复慢。生产建议 5–15 秒，云上跨 AZ 至少 10 秒。
+</Callout>
+
+## 重定向：MOVED 与 ASK
+
+客户端如果把命令发到错误的节点，会得到两种重定向之一：
+
+| 响应 | 含义 | 客户端动作 |
+| --- | --- | --- |
+| `MOVED 5333 10.0.0.2:6379` | 该槽永久属于另一节点 | 更新本地槽表，重试 |
+| `ASK 5333 10.0.0.2:6379` | 该槽正在迁移，部分键已搬走 | **不要** 更新槽表，下次先发 `ASKING` 再发命令 |
+
+智能客户端（jedis cluster、lettuce、go-redis cluster、redis-py cluster、valkey-glide）会缓存槽表（slot map），启动时通过 `CLUSTER SHARDS` 或 `CLUSTER SLOTS` 拉取，再根据 MOVED 增量刷新。这是为什么在线扩容期间偶尔出现 MOVED 是 **正常** 的，不需要立刻报警。
+
+## 故障转移：PSYNC + 选举
+
+```text
+sequenceDiagram
+  participant P as Primary
+  participant R as Replica
+  participant O as Others
+  P--xR: PSYNC（中断）
+  R->>O: FAILOVER_AUTH_REQUEST
+  O-->>R: FAILOVER_AUTH_ACK（多数同意）
+  R->>R: 自我提升为主
+  R->>O: PONG（声明新角色 + 新 epoch）
+```
+
+简化流程：
+
+<Steps>
+<Step>
+主节点 `cluster-node-timeout` 内无 PONG，被多数节点标记 PFAIL，再升级 FAIL。
+</Step>
+<Step>
+其副本启动选举，向其它主节点请求投票（FAILOVER_AUTH_REQUEST）。
+</Step>
+<Step>
+拿到多数票后，副本执行 `REPLICAOF NO ONE`，自我升级，并 broadcast 新配置 epoch。
+</Step>
+<Step>
+原主节点恢复后看到更高 epoch，自动降级为新主的副本。
+</Step>
+</Steps>
+
+副本侧调优：
+
+```ini
+replica-priority 100         # 越小越优先被选；0 表示永不当选
+cluster-replica-validity-factor 10
+cluster-require-full-coverage no   # 部分槽缺失时是否仍对外服务
+```
+
+## 9.0：原子槽迁移
+
+**这是 Valkey 9.0 最重要的特性**。
+
+老的 `MIGRATE` 流程是 **逐键** 的：源节点 `DUMP` 一个键 → `RESTORE` 到目标 → 删除源端键。期间 `MOVED`/`ASK` 来回切，迁移大键时主线程被阻塞，且任何一步失败都可能留下"半个槽在两边都有"的尴尬状态。
+
+9.0 引入了 **原子槽迁移**：源节点对整个槽做一次 fork 快照，把槽内所有键以单条逻辑命令流式发送给目标，目标在原子事务里安装完毕后，源节点一次性弃槽。期间：
+
+- 源端继续服务读写，写操作通过 replication stream 同步给目标。
+- 客户端在切换的瞬间收到一次性的 MOVED，没有 ASKING 中间态。
+- 失败可自动回滚到源端继续持有。
+
+操作命令保持兼容：
+
+```bash
+valkey-cli --cluster reshard 10.0.0.1:6379 \
+  --cluster-from <src-node-id> \
+  --cluster-to <dst-node-id> \
+  --cluster-slots 1000 \
+  --cluster-yes
+```
+
+底层走的就是原子流程。大集群扩缩容的实际体验从"半天忐忑、随时可能要手动救场"变成了"一杯咖啡的事"。
+
+## 9.0：集群多数据库
+
+历史上 Valkey/Redis 集群模式 **只支持 db 0**——这是为了避免跨节点的 db 切换语义混乱。9.0 取消了这一限制：集群下也能用 `SELECT 1`/`SELECT 2`，每个 db 独立的键空间但共享同一套槽映射。
+
+适用场景：
+
+- 多租户隔离，不希望键名前缀方案。
+- 蓝绿数据切换：新数据写到 db 1，验证后 `SWAPDB` 切换。
+
+注意：跨 db 的命令（如 `MOVE`、`COPY DB`）仍然限制在同一节点上，因为它们不能跨网络分片操作。
+
+## 9.x：双通道复制
+
+副本全量同步时，RDB 传输与增量命令流走 **两条独立 TCP**，避免大 RDB 阻塞增量回放。在 100GB 级实例上副本追赶时间从小时级降到分钟级。
+
+```ini
+repl-diskless-sync yes
+dual-channel-replication-enabled yes
+```
+
+## 扩展性
+
+官方与社区基准里的几个标杆数字：
+
+| 规模 | 节点数 | 峰值 RPS |
+| --- | --- | --- |
+| 中等集群 | 64 主 + 64 从 | ~200M |
+| 大型集群 | 512 主 + 512 从 | ~800M |
+| 极限测试 | ~2000 节点 | > 1B |
+
+要把曲线推到这个量级，关键不在加机器，而在：
+
+- 哈希标签设计：避免热点槽。
+- `cluster-node-timeout` 与网络规模匹配（>1000 节点建议 30 秒）。
+- 升级到 8.0+ 享受按槽字典与异步 I/O 红利，详见 [多线程与异步 I/O](/docs/internals/threading)。
+- 客户端用支持 `CLUSTER SHARDS` 的新版本，槽表刷新比 `CLUSTER SLOTS` 高效。
+
+## 排查命令速查
+
+```bash
+valkey-cli --cluster check 10.0.0.1:6379
+valkey-cli --cluster info  10.0.0.1:6379
+valkey-cli CLUSTER NODES | column -t
+valkey-cli CLUSTER SHARDS
+valkey-cli CLUSTER COUNTKEYSINSLOT 5333
+valkey-cli CLUSTER SLOTS-STATS ORDERBY key_count DESC LIMIT 16  # 9.x
+```
+
+`CLUSTER SLOTS-STATS` 是 Valkey 独有的命令，按槽给出 key_count、内存、命令数，定位热点槽的第一手工具。
+
+## 小结
+
+- 槽是分片的最小单位，哈希标签是把多键钉在一起的唯一手段。
+- Gossip 总线决定故障检测速度，超时参数与网络规模配套。
+- 智能客户端缓存槽表 + 处理 MOVED/ASK 即可，业务层无感。
+- 9.0 的原子槽迁移把扩缩容从"高风险手术"变成"日常操作"。
+- 千节点级集群可达 10 亿 RPS，瓶颈往往在键设计与客户端版本。
+
+更操作向的部署/巡检请回到 [集群模式](/docs/cluster)。

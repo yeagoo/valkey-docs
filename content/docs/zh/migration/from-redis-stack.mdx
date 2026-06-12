@@ -1,0 +1,147 @@
+---
+title: Redis Stack 模块怎么迁
+description: RediSearch、RedisJSON、RedisBloom、TimeSeries、Graph 五个模块的 Valkey 对应方案与数据迁移路径。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Search, FileJson, Filter, LineChart, Network, Package } from 'lucide-react';
+
+Redis Stack 把 RediSearch、RedisJSON、RedisBloom、RedisTimeSeries、RedisGraph 五个模块打包发布。这些模块的数据存放在自定义二进制结构里，**不会** 跟着主体数据通过普通 RDB/AOF 迁出去——必须模块对模块地处理。本文按 Valkey 8.1 + valkey-bundle 的现状给出对应关系与迁移步骤。
+
+数据库本体迁移参考 [从 Redis 迁移到 Valkey](/docs/migration/from-redis)。
+
+## 模块对应总览
+
+| Redis Stack 模块 | 命令族 | Valkey 替代 | 兼容度 | 备注 |
+| --- | --- | --- | --- | --- |
+| RediSearch | `FT.*` | valkey-search | 子集 | HNSW 向量 KNN + 二级索引，TEXT 自 v1.2 起支持 |
+| RedisJSON | `JSON.*` | valkey-json | 完整 | RDB 兼容 RedisJSON 1.0.8+，迁移可热加载 |
+| RedisBloom | `BF.*` `CF.*` `CMS.*` `TOPK.*` | valkey-bloom | 仅 BF | Cuckoo / CMS / TopK / t-digest **缺失** |
+| RedisTimeSeries | `TS.*` | 无 | 缺失 | 目前没有官方 Valkey 模块替代 |
+| RedisGraph | `GRAPH.*` | 无 | 缺失 | Redis 自身已 EOL，无替代 |
+
+<Callout type="info" title="valkey-bundle 8.1 GA">
+`valkey-bundle` 是 Valkey 官方维护的捆绑发行版，2026 年 5 月随 9.1 升级，包含 valkey-server、valkey-json 1.0、valkey-bloom 1.0、valkey-search 1.0、valkey-ldap 1.0。生产部署直接用 bundle 比逐个编译模块要省事。
+</Callout>
+
+## RediSearch → valkey-search
+
+valkey-search 与 RediSearch 在 API 上是子集关系：向量与基本二级索引齐备，全文检索 TEXT 从 v1.2 起补齐，但 `FT.SUGGEST`、`FT.SPELLCHECK`、聚合管道里的部分函数仍未对齐。
+
+<Steps>
+<Step>
+**导出索引定义**。RediSearch 的索引存放在模块状态中，需要用 `FT._LIST` + `FT.INFO` 自行抓取：
+
+```bash
+redis-cli FT._LIST | while read idx; do
+  redis-cli FT.INFO "$idx" > "schema_$idx.txt"
+done
+```
+</Step>
+<Step>
+**翻译到 valkey-search 的 `FT.CREATE` 语法**。大多数 `SCHEMA` 子句可以原样复用，重点确认 VECTOR 字段的算法（HNSW/FLAT）、维度、距离度量。
+</Step>
+<Step>
+**先迁底层 Hash/JSON 数据**，再在 Valkey 上重新 `FT.CREATE`。索引会基于已有键回填——大库下用 `FT.INFO` 查 `indexing` 是否归零。
+</Step>
+<Step>
+**对照查询结果**：选 20 条典型 KNN/过滤查询，比对 top-k 与得分。
+</Step>
+</Steps>
+
+更多向量与索引细节见 [向量检索](/docs/ai/vector-search)。
+
+## RedisJSON → valkey-json
+
+这是最平滑的迁移。valkey-json 直接读 RedisJSON 1.0.8+ 写出的 RDB 段，命令族完全一致。
+
+```bash
+# Valkey 启动时加载模块
+valkey-server --loadmodule /opt/valkey/lib/libvalkeyjson.so
+
+# 之后 JSON.GET / JSON.SET / JSON.ARRAPPEND 用法不变
+valkey-cli JSON.GET user:42 '$.profile.email'
+```
+
+如果走 [从 Redis 迁移到 Valkey](/docs/migration/from-redis) 的文件搬迁，把模块加载到 valkey-server 启动参数后，RDB 中的 JSON 类型会被识别并恢复。复制路径同理——Valkey 副本需要在 `REPLICAOF` 之前先 `MODULE LOAD`。
+
+## RedisBloom → valkey-bloom
+
+<Callout type="warn" title="只覆盖 Bloom Filter">
+valkey-bloom **只实现了 BF.* 命令族**。如果你在用 Cuckoo Filter (`CF.*`)、Count-Min Sketch (`CMS.*`)、Top-K (`TOPK.*`)、t-digest (`TDIGEST.*`)，目前没有 Valkey 官方替代，需要自研或保留一个 Redis Stack 实例专门服务这些数据结构。
+</Callout>
+
+BF 数据可通过模块 RDB 段直接加载（valkey-bloom 1.0 与 RedisBloom 2.x 的 BF 段二进制兼容）。其它子族建议：
+
+| 旧模块命令 | 替代思路 |
+| --- | --- |
+| `CF.*` Cuckoo | 应用层用 RocksDB / Pebble 自管；或保留 RedisBloom 实例 |
+| `CMS.*` Count-Min | 业务侧用 HyperLogLog (`PFADD`/`PFCOUNT`) 估算基数，或自实现 |
+| `TOPK.*` | 用 Sorted Set + `ZADD GT` 维护近似 TopK |
+| `TDIGEST.*` | 上报到 Prometheus / VictoriaMetrics，由可观测层算分位 |
+
+参考 [Bloom 与 JSON](/docs/ai/bloom-and-json)。
+
+## RedisTimeSeries → 时序数据空档
+
+Valkey 生态目前没有官方时序模块。可选方案：
+
+<Cards>
+  <Card icon={<LineChart />} title="VictoriaMetrics / Prometheus" href="https://victoriametrics.com/">
+    把时序工作负载彻底搬到专用 TSDB，是最稳的长期选择。
+  </Card>
+  <Card icon={<Package />} title="保留 Redis Stack 实例" href="/docs/operations">
+    把时序数据留在 Redis Stack，业务其它部分迁 Valkey，逐步替换。
+  </Card>
+</Cards>
+
+如果数据量小（单序列 GB 级以内），也可以把 `TS.*` 调用层封装成对 Stream + Sorted Set 的组合操作——但聚合/降采样需要自己实现。
+
+## RedisGraph → 无替代
+
+Redis 自己已经在 2023 年底 EOL 了 RedisGraph，所以也没有动力做 Valkey 移植。Cypher 工作负载建议迁往 Neo4j、Apache AGE 或 KuzuDB。
+
+## 装载与升级建议
+
+模块加载有两种方式：
+
+<Tabs items={['配置文件', '运行时']}>
+<Tab value="配置文件">
+
+```ini
+# /etc/valkey/valkey.conf
+loadmodule /opt/valkey/lib/libvalkeyjson.so
+loadmodule /opt/valkey/lib/libvalkeybloom.so
+loadmodule /opt/valkey/lib/libvalkeysearch.so
+```
+
+重启 valkey-server 生效，集群中所有节点都要同步配置。
+
+</Tab>
+<Tab value="运行时">
+
+```bash
+valkey-cli MODULE LOAD /opt/valkey/lib/libvalkeyjson.so
+valkey-cli MODULE LIST
+```
+
+适合验证环境，但重启后丢失，生产请走配置文件。
+
+</Tab>
+</Tabs>
+
+<Callout>
+模块版本与 Valkey 主程序版本耦合度高，强烈建议直接使用 valkey-bundle 发行包，避免 ABI 漂移导致 `MODULE LOAD` 段错误。
+</Callout>
+
+## 迁移顺序建议
+
+1. 先把不依赖模块的核心数据按 [从 Redis 迁移到 Valkey](/docs/migration/from-redis) 切到 Valkey。
+2. 再装载 valkey-json、valkey-bloom，让对应键自动可用。
+3. 对 RediSearch，先把 Hash/JSON 文档迁过去，再重建索引。
+4. 时序与图数据单独评估是否值得迁——很多场景应该顺势挪到专用数据库。
+
+下一步可读 [向量检索](/docs/ai/vector-search) 学习 valkey-search 的 HNSW 调参。

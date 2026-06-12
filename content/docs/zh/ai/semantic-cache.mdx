@@ -1,0 +1,122 @@
+---
+title: LLM 语义缓存：省下 86% 推理成本
+description: 用 Valkey 向量检索做语义缓存，相似提问直接命中缓存，跳过 LLM 调用。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+精确字符串缓存只在「一模一样」的提问上命中。语义缓存把提问 embedding 后做向量检索：只要新提问和历史提问足够相似，就直接返回缓存的回答，跳过昂贵的 LLM 调用。这是 Valkey「统一引擎」最划算的一种用法——同一套 Valkey 既存缓存又跑[向量检索](/docs/ai/vector-search)。
+
+## 工作流：Read-Through
+
+<Steps>
+<Step>把用户提问 embedding 成向量。</Step>
+<Step>在缓存索引里做 KNN 检索，找最相似的历史提问。</Step>
+<Step>如果相似度达到阈值，直接返回缓存的回答，结束。</Step>
+<Step>否则调用 LLM，再把 (embedding, prompt, response) 写入缓存并设置 TTL。</Step>
+</Steps>
+
+## 收益（AWS 基准）
+
+AWS 用 63,796 条查询、Titan Text Embeddings V2、ElastiCache for Valkey 实测：
+
+| 指标 | 结果 |
+| --- | --- |
+| LLM 成本下降 | 最高 86% |
+| 延迟下降 | 最高 88% |
+| 单次命中加速 | 最高 59 倍（6.51s → 0.11s） |
+
+在相似度阈值 0.75 时：命中率 90.3%，每日成本从 $49.50 降到 $6.80，回答准确率 91.2%。
+
+<Callout type="info">
+阈值甜区是 **0.75 ～ 0.8**。太低会把不相关的提问当成命中（准确率下降），太高则命中率上不去、省不了钱。
+</Callout>
+
+## 建缓存索引
+
+缓存条目用 Hash 存：提问的 embedding、原始提问文本、LLM 回答。
+
+```text
+FT.CREATE semantic_cache
+  SCHEMA
+    embedding VECTOR HNSW 6 TYPE FLOAT32 DIM 1536 DISTANCE_METRIC COSINE
+    prompt TEXT
+    response TEXT
+```
+
+<Callout type="warn">
+`TEXT` 字段需要 valkey-search 1.2.0+（2026 年 3 月）。若版本更低，把 `prompt` / `response` 改成 `TAG` 字段，或干脆只把文本存进 Hash 而不索引（语义缓存只需要对 `embedding` 做 KNN）。
+</Callout>
+
+## 阈值调优
+
+COSINE 距离范围是 0～2，距离越小越相似。「相似度阈值 0.75」对应的是相似度分数，转成距离判断时注意方向。建议：
+
+- 从 0.75 起步，观察命中率与准确率。
+- 命中里出现明显答非所问 → 调高阈值（更严格）。
+- 命中率太低、省不下钱 → 调低阈值（更宽松）。
+- 给缓存条目设 TTL，让过期知识自然淘汰。
+
+## 用 langchain-redis 接 Valkey
+
+<Callout type="warn">
+**没有 `langchain-valkey` 这个包。** 用 `langchain-redis` 的类，把连接 URL 指向 Valkey 即可（wire 兼容）。
+</Callout>
+
+`RedisSemanticCache` 做语义缓存（需要支持检索的 Valkey）：
+
+```python
+from langchain_redis import RedisSemanticCache
+from langchain_openai import OpenAIEmbeddings
+from langchain_core.globals import set_llm_cache
+
+cache = RedisSemanticCache(
+    redis_url="redis://valkey-host:6379",
+    embeddings=OpenAIEmbeddings(),
+    distance_threshold=0.2,  # COSINE 距离，越小越严格
+)
+set_llm_cache(cache)
+```
+
+如果只想要精确字符串缓存（任意 Valkey 都行，不需要检索能力），用 `RedisCache`：
+
+```python
+from langchain_redis import RedisCache
+from langchain_core.globals import set_llm_cache
+
+set_llm_cache(RedisCache(redis_url="redis://valkey-host:6379"))
+```
+
+## 用 redisvl 接 Valkey
+
+`redisvl` 自带语义缓存扩展，`distance_threshold` 用的就是 COSINE 距离（0～2）：
+
+```python
+from redisvl.extensions.cache.llm import SemanticCache
+
+cache = SemanticCache(
+    name="llmcache",
+    redis_url="redis://valkey-host:6379",
+    distance_threshold=0.2,
+    ttl=3600,
+)
+
+# 查缓存
+if hit := cache.check(prompt="今天北京天气怎么样？"):
+    response = hit[0]["response"]
+else:
+    response = call_llm("今天北京天气怎么样？")
+    cache.store(prompt="今天北京天气怎么样？", response=response)
+```
+
+## 一个注意点
+
+Redis 有个托管的 REST 语义缓存服务 LangCache，但**没有对应的托管 Valkey 版本**。在 Valkey 上要自己实现上面这套模式（自托管），逻辑并不复杂，且完全在你掌控之内。
+
+## 相关阅读
+
+<Steps>
+<Step>先搭好 [valkey-search 向量检索](/docs/ai/vector-search) 作为缓存底座。</Step>
+<Step>语义缓存与 [RAG 架构](/docs/ai/rag) 可共用同一套 Valkey。</Step>
+</Steps>

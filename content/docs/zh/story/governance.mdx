@@ -1,0 +1,93 @@
+---
+title: 社区治理：Linux 基金会与 TSC
+description: Valkey 是怎么做决策的，谁在掌舵，以及和 Redis 公司单一控制的对比。
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Card, Cards } from 'fumadocs-ui/components/card';
+import { Users, GitPullRequest, Calendar, Scale } from 'lucide-react';
+
+## 一句话总结
+
+Valkey 由 **Linux 基金会**托管，技术决策由 **TSC（Technical Steering Committee，技术指导委员会）**做出。TSC 章程明确规定**任何单一公司在 TSC 中的代表不能超过 1/3**——这条规则是从 2024 年分叉日起就写进章程的，是 Valkey 与 Redis 公司模式最根本的差别。
+
+## TSC 怎么组成
+
+截至 2026 年 6 月的 TSC 主要成员：
+
+| 成员 | 所属公司 | 角色 |
+| --- | --- | --- |
+| Madelyn Olson | Amazon (AWS) | TSC 主席 |
+| Ping Xie | Google Cloud | 维护者 |
+| Viktor Söderqvist | Ericsson | 维护者 |
+| Zhao Zhao | 独立 / 多家贡献 | 维护者 |
+| Hassan Hamade | Snap | 维护者 |
+| Wen Hui | Huawei | 维护者 |
+| Ran Shidlansik | (旋转席位) | 维护者 |
+
+席位会随时间调整，准确名单见 [github.com/valkey-io/valkey/blob/unstable/GOVERNANCE.md](https://github.com/valkey-io/valkey)。
+
+<Callout type="info">
+主席每年选举一次。Madelyn Olson 自项目成立起担任主席至今，曾是 Redis 时代任职时间最长的核心维护者之一。
+</Callout>
+
+## ≤1/3 规则到底约束了什么
+
+如果 AWS 想合并一个对自己有利、但对其它云厂不友好的改动，他们在 TSC 里的投票权最多只能影响 1/3。这条规则强制了：
+
+- **重大架构决策需要跨公司共识**——比如集群协议改动、模块 API 变更。
+- **每家公司都有否决权但没有独占权**——任何提案需要多家点头。
+- **避免"再 Redis 化"**——再没有任何一家公司可以单方面改许可协议。
+
+## 决策流程
+
+<Cards>
+  <Card icon={<GitPullRequest />} title="日常代码变更">
+    任何人开 PR，由模块 maintainer review。小改动两位 maintainer LGTM 即可合并。
+  </Card>
+  <Card icon={<Users />} title="重大变更（RFC）">
+    在 valkey-io/valkey 仓库提一个标记 `major-decision` 的 issue，社区讨论 1~2 周，TSC 投票。
+  </Card>
+  <Card icon={<Calendar />} title="周会">
+    TSC 每周开一次社区会议（公开），录像和纪要发到 GitHub。
+  </Card>
+  <Card icon={<Scale />} title="商标 / 协议">
+    商标归 Linux 基金会，协议变更需要 TSC 一致通过 + 基金会董事会批准。理论上没人能再单方面改。
+  </Card>
+</Cards>
+
+## Maintainer 路径
+
+成为 maintainer 大致是这样的台阶：
+
+1. **Contributor**：合并过几个 PR。
+2. **Module owner**：长期维护某个子模块（比如 cluster、scripting、networking），由现任 maintainer 提名。
+3. **Maintainer**：可对该模块独立合并 PR。
+4. **TSC 成员**：由现 TSC 选举，考虑技术贡献 + 公司分布平衡。
+
+具体晋升流程见 GOVERNANCE.md。
+
+## 和 Redis 公司模式的对比
+
+| 维度 | Valkey | Redis |
+| --- | --- | --- |
+| 协议 | BSD-3-Clause | AGPLv3 / RSALv2 / SSPL 三选一 |
+| 托管方 | Linux 基金会（独立中立） | Redis Inc.（商业公司） |
+| 决策权 | TSC 多公司投票，≤1/3 同公司 | Redis 公司内部，antirez 是开发者倡导者 |
+| 路线图 | RFC 公开讨论 | 公司决定 |
+| 商标 | 基金会持有 | Redis 公司持有 |
+| 历史 | 2024-03 分叉 | 2009 起，2024-03 改协议 |
+
+两种模式没有绝对优劣：Redis 公司模式响应快、方向集中，但风险也集中；Valkey 模式更慢但更稳，没有哪家公司能"任性"。
+
+## 怎么参与
+
+- **报 bug / 提需求**：去 [github.com/valkey-io/valkey/issues](https://github.com/valkey-io/valkey/issues)。
+- **看代码 / 提 PR**：[github.com/valkey-io/valkey](https://github.com/valkey-io/valkey)，主分支叫 `unstable`，发布分支按版本号。
+- **周会**：日程在 [valkey.io/community](https://valkey.io/community) 公布，Zoom 链接公开。
+- **Slack / Matrix**：valkey.io 顶部有入口。中文圈也在汇聚中，欢迎关注 valkey-cn 之类的社群。
+- **赞助**：通过 Linux 基金会的 Valkey 项目页面，企业可成为白金 / 黄金 / 银级会员。
+
+<Callout type="info">
+如果你只是想"用"Valkey，不打算贡献代码，那治理这一节其实最该读——它告诉你这个项目接下来 10 年大概率会怎么走。
+</Callout>

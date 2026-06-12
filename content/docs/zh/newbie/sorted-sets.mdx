@@ -1,0 +1,130 @@
+---
+title: Sorted Set：排行榜与延时队列
+description: 用带分数的有序集合实现排行榜、延时任务队列和滑动窗口限流
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+> Sorted Set（有序集合，简称 ZSet）= Set 的去重 + 每个成员一个 `score` 分数 + 按分数自动排序。它是排行榜、延时队列、滑动窗口限流的不二之选。
+
+## 基本操作
+
+```text
+127.0.0.1:6379> ZADD rank 100 alice 80 bob 95 carol
+(integer) 3
+127.0.0.1:6379> ZSCORE rank alice
+"100"
+127.0.0.1:6379> ZINCRBY rank 50 bob
+"130"
+127.0.0.1:6379> ZCARD rank
+(integer) 3
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `ZADD k score m` | 添加 / 更新成员分数 |
+| `ZSCORE k m` | 查成员分数 |
+| `ZINCRBY k n m` | 给成员分数加 n |
+| `ZRANK k m` / `ZREVRANK k m` | 升序 / 降序排名（从 0 开始） |
+| `ZCARD k` | 成员总数 |
+| `ZCOUNT k min max` | 分数在区间内的成员数 |
+| `ZREM k m` | 删除成员 |
+
+## 场景一：游戏排行榜
+
+分数就是积分，排序天然由 Valkey 维护。取「前 3 名」用 `ZRANGE ... REV`，带上分数加 `WITHSCORES`：
+
+```text
+127.0.0.1:6379> ZRANGE rank 0 2 REV WITHSCORES
+1) "bob"
+2) "130"
+3) "alice"
+4) "100"
+5) "carol"
+6) "95"
+```
+
+查某个玩家自己的排名（降序，第 0 名是第一名，所以 +1 才是「第几名」）：
+
+```text
+127.0.0.1:6379> ZREVRANK rank carol
+(integer) 2
+```
+
+`ZRANGE` 是现代统一入口，常用修饰符：
+
+| 修饰符 | 作用 |
+| --- | --- |
+| `REV` | 倒序（高分在前） |
+| `WITHSCORES` | 连同分数一起返回 |
+| `BYSCORE` | 按分数区间取（替代旧的 `ZRANGEBYSCORE`） |
+| `BYLEX` | 按字典序取（分数相同时） |
+| `LIMIT offset count` | 分页（需配合 BYSCORE/BYLEX） |
+
+```text
+127.0.0.1:6379> ZRANGE rank 90 200 BYSCORE WITHSCORES LIMIT 0 10
+1) "carol"
+2) "95"
+3) "alice"
+4) "100"
+5) "bob"
+6) "130"
+```
+
+## 场景二：延时队列
+
+把「执行时间戳」当作 score，到点的任务自然排在最前。生产者投递时 score 设为期望执行的 Unix 时间：
+
+```text
+127.0.0.1:6379> ZADD delayed 1734000000 "发送提醒:order42"
+(integer) 1
+```
+
+消费者轮询「分数 ≤ 当前时间」的任务（取出后再 `ZREM` 删除）：
+
+```text
+127.0.0.1:6379> ZRANGE delayed 0 1734000000 BYSCORE LIMIT 0 10
+1) "发送提醒:order42"
+127.0.0.1:6379> ZREM delayed "发送提醒:order42"
+(integer) 1
+```
+
+<Callout type="warn">
+「取出」和「删除」之间存在竞态：多个消费者可能同时捞到同一个任务。生产环境要把「取 + 删」放进一段 Lua 脚本里原子执行，详见[脚本与函数](/docs/zh/newbie/scripting-and-functions)。
+</Callout>
+
+## 场景三：滑动窗口限流
+
+思路：每次请求把「当前时间戳」`ZADD` 进用户的窗口集合，先用 `ZREMRANGEBYSCORE` 清掉窗口外的旧记录，再用 `ZCARD` 数窗口内还剩几次。比如「60 秒内最多 100 次」：
+
+```text
+# 假设现在是 1734000060，窗口 60 秒，则窗口起点 1734000000
+127.0.0.1:6379> ZREMRANGEBYSCORE rl:user:1 0 1734000000
+(integer) 3
+127.0.0.1:6379> ZADD rl:user:1 1734000060 req:1734000060
+(integer) 1
+127.0.0.1:6379> ZCARD rl:user:1
+(integer) 1
+```
+
+如果 `ZCARD` 结果低于 100 就放行，否则拒绝。这套逻辑同样建议用 Lua 原子化。
+
+## 弹出最值与阻塞读
+
+`ZPOPMIN` / `ZPOPMAX` 弹出分数最小 / 最大的成员；`BZPOPMIN` 是阻塞版，可像优先级队列那样阻塞等待新任务：
+
+```text
+127.0.0.1:6379> ZPOPMIN rank
+1) "carol"
+2) "95"
+127.0.0.1:6379> BZPOPMIN delayed 5
+（阻塞最多 5 秒，等待最小分数成员）
+```
+
+---
+
+## 下一篇
+
+排行榜搞定了。接下来看专为「append-only 日志 + 消费组」设计的 Stream。
+
+继续阅读 → [Stream：append-only 日志与消费组](/docs/zh/newbie/streams)
