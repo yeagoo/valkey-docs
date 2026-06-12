@@ -40,7 +40,7 @@ Picking the right structure is the single biggest performance lever in Valkey. A
 - **Real-time feeds** — Streams with consumer groups replace lightweight Kafka use cases.
 - **Pub/sub & WebSocket fanout** — push notifications to N connected clients.
 - **Distributed lock** — `SET key value NX EX 10` plus token-based release. (Redlock for stronger guarantees, but simple SET is enough for most cases.)
-- **Vector + semantic cache** — see [For AI developers](/docs/en/for-ai-devs).
+- **Vector + semantic cache** — see [For AI developers](/en/docs/for-ai-devs).
 
 ## Relationship to Redis
 
@@ -57,7 +57,7 @@ Where Valkey starts to diverge:
 - **New commands** like the embedded-keys-aware `OBJECT`, hash field TTLs in 8.0+, and cluster shard groups in 9.0+ may not exist on Redis.
 - **Modules** — Valkey ships its own `valkey-search`, `valkey-bloom`, `valkey-json`, `valkey-ldap`. Redis ships RediSearch, RedisJSON, etc. APIs are largely overlapping but not identical.
 
-For most application code, switching Redis to Valkey is a config change. For operations and tooling, read the [versions page](/docs/en/versions) before upgrading across the 7.4 boundary.
+For most application code, switching Redis to Valkey is a config change. For operations and tooling, read the [versions page](/en/docs/versions) before upgrading across the 7.4 boundary.
 
 <Callout type="info">
 **Rule of thumb**: if your project is starting today and you have no contractual reason to stay on Redis, pick Valkey. It is BSD-licensed, foundation-governed, and what your cloud provider is likely running anyway.

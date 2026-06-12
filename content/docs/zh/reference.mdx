@@ -153,6 +153,13 @@ valkeys://default:pass@node-1.example.com:6379/0?timeout=2s
 | `-x` | 从 stdin 读最后一个参数（管道场景） |
 | `--rdb dump.rdb` | 下载 RDB |
 
+环境变量：
+
+| 变量 | 作用 |
+| --- | --- |
+| `VALKEYCLI_AUTH` | 密码——避免在命令行写 `-a`（会出现在 `ps` 与 shell 历史里） |
+| `VALKEYCLI_RCFILE` | 启动脚本，类似 `~/.valkeyclirc` |
+
 ## INFO 主要 section
 
 | Section | 内容 |

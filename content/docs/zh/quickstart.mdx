@@ -63,7 +63,7 @@ server_name:valkey
 
 ## 路径二：包管理器（裸机 / VM）
 
-<Tabs items={['Ubuntu / Debian', 'RHEL / Fedora / Rocky', 'macOS (Homebrew)', '源码编译']}>
+<Tabs items={['Ubuntu / Debian', 'RHEL / Fedora / Rocky', 'SUSE / SLES', 'Arch', 'macOS (Homebrew)', '源码编译']}>
 
 <Tab value="Ubuntu / Debian">
 
@@ -89,6 +89,31 @@ sudo dnf install valkey-compat-redis
 sudo systemctl enable --now valkey
 valkey-cli ping
 ```
+
+</Tab>
+
+<Tab value="SUSE / SLES">
+
+```bash
+# SLES 15 SP7+：因为同名包冲突，需要 --force-resolution
+sudo zypper install --force-resolution valkey-compat-redis
+# 配置文件仍在 /etc/redis/valkey.conf，二进制软链到 /usr/sbin/redis-server
+sudo systemctl enable --now valkey
+valkey-cli ping
+```
+
+迁移后 `INFO` 会同时报 `redis_version:7.2.4` 和 `valkey_version:7.2.5`，`redis-cli` 是 `valkey-cli` 的软链——老脚本不用改。
+
+</Tab>
+
+<Tab value="Arch">
+
+```bash
+sudo pacman -S valkey
+sudo systemctl enable --now valkey
+```
+
+Arch 的包名直接就是 `valkey`，干净没有兼容层。
 
 </Tab>
 
