@@ -90,7 +90,7 @@ import { Callout } from 'fumadocs-ui/components/callout';
 ```
 
 <Callout type="warn">
-「取出」和「删除」之间存在竞态：多个消费者可能同时捞到同一个任务。生产环境要把「取 + 删」放进一段 Lua 脚本里原子执行，详见[脚本与函数](/docs/zh/newbie/scripting-and-functions)。
+「取出」和「删除」之间存在竞态：多个消费者可能同时捞到同一个任务。生产环境要把「取 + 删」放进一段 Lua 脚本里原子执行，详见[脚本与函数](/docs/newbie/scripting-and-functions)。
 </Callout>
 
 ## 场景三：滑动窗口限流
@@ -127,4 +127,4 @@ import { Callout } from 'fumadocs-ui/components/callout';
 
 排行榜搞定了。接下来看专为「append-only 日志 + 消费组」设计的 Stream。
 
-继续阅读 → [Stream：append-only 日志与消费组](/docs/zh/newbie/streams)
+继续阅读 → [Stream：append-only 日志与消费组](/docs/newbie/streams)

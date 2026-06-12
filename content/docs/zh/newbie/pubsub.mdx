@@ -91,7 +91,7 @@ OK
 <Callout type="warn">
 **Pub/Sub 是即发即弃的。** 它不持久化、不重试：订阅者掉线期间的消息会永久丢失；没有 ack、没有历史回放。它适合「实时但可容忍丢失」的场景（在线状态、实时弹幕、配置推送）。
 
-如果你需要消息**不丢**、能回溯、能多消费者确认，请改用 [Stream](/docs/zh/newbie/streams)。
+如果你需要消息**不丢**、能回溯、能多消费者确认，请改用 [Stream](/docs/newbie/streams)。
 </Callout>
 
 ## 该选哪个？
@@ -109,4 +109,4 @@ OK
 
 聊完了所有数据结构，接下来是两个贯穿全局的运维基础——过期与内存淘汰。
 
-继续阅读 → [过期与淘汰：TTL 与 maxmemory](/docs/zh/newbie/ttl-and-eviction)
+继续阅读 → [过期与淘汰：TTL 与 maxmemory](/docs/newbie/ttl-and-eviction)

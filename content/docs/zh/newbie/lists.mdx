@@ -82,7 +82,7 @@ OK
 这条命令原子地把 `tasks` 右端的元素弹出、压入 `processing` 左端。消费者处理完后再从 `processing` 删掉它；万一崩溃，任务还躺在 `processing` 里，可被重新捞起重试。
 
 <Callout type="info">
-`BLMOVE` 是 `LMOVE` 的阻塞版，是搭建「不丢消息」工作队列的经典组合。如果你需要更完整的确认（ack）、消费组、重投递机制，请直接看 [Stream](/docs/zh/newbie/streams)。
+`BLMOVE` 是 `LMOVE` 的阻塞版，是搭建「不丢消息」工作队列的经典组合。如果你需要更完整的确认（ack）、消费组、重投递机制，请直接看 [Stream](/docs/newbie/streams)。
 </Callout>
 
 ## 场景四：聊天记录
@@ -99,4 +99,4 @@ OK
 
 List 允许重复元素且有序。如果你要的是「去重」和「集合运算」，该用 Set 了。
 
-继续阅读 → [Set：去重、标签与集合运算](/docs/zh/newbie/sets)
+继续阅读 → [Set：去重、标签与集合运算](/docs/newbie/sets)
